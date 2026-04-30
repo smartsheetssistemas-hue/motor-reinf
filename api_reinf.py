@@ -242,3 +242,59 @@ def transmitir_xml(lote: LoteReinf):
 
     except Exception as e:
         return {"sucesso": False, "erro": f"Erro Interno da API: {str(e)}"}
+# ---------------------------------------------------------
+# NOVA ROTA: CONSULTAR PROTOCOLO NO E-CAC
+# ---------------------------------------------------------
+class ConsultaReinf(BaseModel):
+    cnpj: str
+    protocolo: str
+    cert_b64: str
+    cert_senha: str
+
+@app.post("/consultar")
+def consultar_xml(consulta: ConsultaReinf):
+    try:
+        # 1. Pega o certificado da memória
+        chave_privada, cert_der, cert_pem, chave_pem = preparar_credenciais_memoria(consulta.cert_b64, consulta.cert_senha)
+        
+        # 2. Rota oficial de Consulta do Governo
+        url_consulta = f"https://reinf.receita.economia.gov.br/consulta/lotes/{consulta.protocolo}"
+        
+        # 3. Salva chaves temporárias para a conexão HTTPS
+        caminho_cert = f"/tmp/cert_cons_{consulta.cnpj}.pem"
+        caminho_key = f"/tmp/key_cons_{consulta.cnpj}.pem"
+        if os.name == 'nt':
+            caminho_cert, caminho_key = f"cert_cons_{consulta.cnpj}.pem", f"key_cons_{consulta.cnpj}.pem"
+
+        with open(caminho_cert, 'wb') as f: f.write(cert_pem)
+        with open(caminho_key, 'wb') as f: f.write(chave_pem)
+        
+        # 4. Faz a requisição de GET (Consulta)
+        res = requests.get(url_consulta, cert=(caminho_cert, caminho_key))
+        
+        # Apaga os arquivos do certificado
+        try:
+            os.remove(caminho_cert)
+            os.remove(caminho_key)
+        except:
+            pass
+            
+        xml_retorno = res.text
+        
+        # 5. Analisa a Resposta do Governo
+        if "<cdResposta>2</cdResposta>" in xml_retorno or "<cdRetorno>0</cdRetorno>" in xml_retorno:
+            recibo_match = re.search(r'<nrRecibo>(.*?)</nrRecibo>', xml_retorno)
+            if not recibo_match: 
+                recibo_match = re.search(r'<nrRecArqBase>(.*?)</nrRecArqBase>', xml_retorno)
+            recibo = recibo_match.group(1) if recibo_match else "Recibo Oculto"
+            
+            return {"sucesso": True, "recibo": recibo, "xml_retorno": xml_retorno}
+            
+        elif "cdResposta>1<" in xml_retorno:
+            return {"sucesso": False, "erro": "Lote ainda em processamento na fila da Receita. Tente novamente em alguns minutos."}
+            
+        else:
+            return {"sucesso": False, "erro": f"Lote Rejeitado pelo e-CAC:\n{xml_retorno}"}
+            
+    except Exception as e:
+        return {"sucesso": False, "erro": f"Erro Interno da API: {str(e)}"}
