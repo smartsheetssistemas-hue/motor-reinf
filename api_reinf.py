@@ -162,56 +162,57 @@ def assinar_xades_icp_brasil(xml_str, chave_privada, cert_der):
 # ASSINADOR ESPECÍFICO PARA A PREFEITURA DE SP (XMLDSig Padrão)
 # ---------------------------------------------------------
 def assinar_xml_sp(xml_str, chave_privada, cert_der):
-    # 1. Lê a raiz do XML
+    # 1. Pega o XML e remove lixos e quebras de linha que a prefeitura não gosta
+    xml_str = xml_str.replace('\n', '').replace('\r', '')
     xml_root = etree.fromstring(xml_str.encode('utf-8'))
     
-    # 2. Canonicaliza (Padroniza) a raiz INTEIRA (pois não tem tag de Id em SP)
+    # 2. Canonicaliza a raiz para gerar o Hash exato do Pedido
     xml_c14n = etree.tostring(xml_root, method="c14n", exclusive=True, with_comments=False)
-    
-    # 3. Gera o Hash com SHA1 (Exigência de SP)
     digest_xml = base64.b64encode(hashlib.sha1(xml_c14n).digest()).decode('utf-8')
 
     cert_b64 = base64.b64encode(cert_der).decode('utf-8')
 
-    # 4. Monta o bloco de assinatura (Referenciando a raiz vazia URI="")
-    signature_xml = f'''<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
-  <SignedInfo>
-    <CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
-    <SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1" />
-    <Reference URI="">
-      <Transforms>
-        <Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature" />
-        <Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
-      </Transforms>
-      <DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1" />
-      <DigestValue>{digest_xml}</DigestValue>
-    </Reference>
-  </SignedInfo>
-  <SignatureValue>DUMMY_SIGNATURE_VALUE</SignatureValue>
-  <KeyInfo>
-    <X509Data>
-      <X509Certificate>{cert_b64}</X509Certificate>
-    </X509Data>
-  </KeyInfo>
-</Signature>'''
+    # 3. Monta o bloco de assinatura cravando o namespace ds:
+    signature_xml = f'''<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+  <ds:SignedInfo>
+    <ds:CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
+    <ds:SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1" />
+    <ds:Reference URI="">
+      <ds:Transforms>
+        <ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature" />
+        <ds:Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
+      </ds:Transforms>
+      <ds:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1" />
+      <ds:DigestValue>{digest_xml}</ds:DigestValue>
+    </ds:Reference>
+  </ds:SignedInfo>
+  <ds:SignatureValue>DUMMY_SIGNATURE_VALUE</ds:SignatureValue>
+  <ds:KeyInfo>
+    <ds:X509Data>
+      <ds:X509Certificate>{cert_b64}</ds:X509Certificate>
+    </ds:X509Data>
+  </ds:KeyInfo>
+</ds:Signature>'''
 
-    # 5. Injeta a assinatura provisória dentro do XML (Antes da tag de fechamento)
+    # 4. A mágica para SP: Injeta a Tag ANTES de fechar a Consulta e resolve o problema do Namespace
     xml_str_com_sig = xml_str.replace('</p1:PedidoConsultaNFeRecebidas>', f'{signature_xml}</p1:PedidoConsultaNFeRecebidas>')
     xml_root_sig = etree.fromstring(xml_str_com_sig.encode('utf-8'))
 
-    # 6. Assina os Infos com a Chave Privada
-    signed_info_node = xml_root_sig.find('.//{http://www.w3.org/2000/09/xmldsig#}SignedInfo')
+    # 5. Busca o nó assinado garantindo que o XPath acha, não importa o prefixo
+    signed_info_node = xml_root_sig.xpath('.//*[local-name()="SignedInfo"]')[0]
+    
+    # Se ele achou o nó, ele tira o C14N e assina
     signed_info_c14n = etree.tostring(signed_info_node, method="c14n", exclusive=True, with_comments=False)
     
-    # SP Usa SHA1
+    # SP Usa SHA1 (A assinatura final)
     signature_bytes = chave_privada.sign(signed_info_c14n, padding.PKCS1v15(), hashes.SHA1())
     signature_b64 = base64.b64encode(signature_bytes).decode('utf-8')
 
-    # 7. Injeta a assinatura real
-    sig_value_node = xml_root_sig.find('.//{http://www.w3.org/2000/09/xmldsig#}SignatureValue')
+    # 6. Grava a assinatura no XML
+    sig_value_node = xml_root_sig.xpath('.//*[local-name()="SignatureValue"]')[0]
     sig_value_node.text = signature_b64
 
-    # Retorna o XML pronto para envelopar no SOAP!
+    # Retorna o texto formatado limpo
     return etree.tostring(xml_root_sig, encoding='utf-8').decode('utf-8')
 
 # 3. A ROTA DE TRANSMISSÃO
