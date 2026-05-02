@@ -469,13 +469,19 @@ def buscar_notas(consulta: ConsultaNotas):
 
                 xml_retorno = etree.fromstring(xml_retorno_str[0].encode('utf-8'))
                 
-                erros_sp = xml_retorno.xpath('//*[local-name()="Alerta"]')
-                if erros_sp:
-                    msg_alerta = erros_sp[0].xpath('.//*[local-name()="Descricao"]/text()')[0]
-                    if "Nenhuma NFe" in msg_alerta or "Nenhum" in msg_alerta:
-                        return {"sucesso": True, "qtd": 0, "notas": []}
-                    else:
-                        return {"sucesso": False, "erro": f"Erro PASSO 8 (Alerta Pref): {msg_alerta}"}
+                # Checa os Alertas da Prefeitura
+            erros_sp = xml_retorno.xpath('//*[local-name()="Alerta"]')
+            if erros_sp:
+                msg_alerta = erros_sp[0].xpath('.//*[local-name()="Descricao"]/text()')[0]
+                
+                # MODO ESPIÃO: Devolve o XML original que a prefeitura mandou pra nós lermos!
+                # Limita a 800 caracteres para caber na tela do Sheets.
+                xml_bruto_resposta = xml_retorno_str[0][:800] 
+                
+                if "Nenhuma NFe" in msg_alerta or "Nenhum" in msg_alerta:
+                    return {"sucesso": False, "erro": f"MODO ESPIÃO (Sem notas) -> {msg_alerta} ||| XML PREFEITURA: {xml_bruto_resposta}"}
+                else:
+                    return {"sucesso": False, "erro": f"Prefeitura recusou a busca: {msg_alerta} ||| XML PREFEITURA: {xml_bruto_resposta}"}
 
                 nfs = xml_retorno.xpath('//*[local-name()="NFe"]')
                 
