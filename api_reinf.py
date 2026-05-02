@@ -351,3 +351,44 @@ def buscar_notas(consulta: ConsultaNotas):
 
     except Exception as e:
         return {"sucesso": False, "erro": str(e)}
+# =========================================================
+# NOVA ROTA: ROBÔ EXTRATOR UNIVERSAL DE NOTAS FISCAIS
+# =========================================================
+class ConsultaNotas(BaseModel):
+    cnpj_tomador: str
+    ccm: str
+    data_ini: str
+    data_fim: str
+    portal: str
+    cert_b64: str
+    cert_senha: str
+
+@app.post("/buscar_notas")
+def buscar_notas(consulta: ConsultaNotas):
+    try:
+        # Prepara a lista vazia (Mudamos o nome para não travar o chat)
+        lista_de_notas = list()
+        
+        # Simulador: Se a busca for em SP, ele devolve uma nota de teste
+        if consulta.portal == "SP_CAPITAL":
+            lista_de_notas.append({
+                "nf": "555",
+                "serie": "SN",
+                "cnpj_prestador": "10611620000110",
+                "nome_prestador": "ASTERSEG ELETRONICA LTDA",
+                "emissao": "2026-05-10",
+                "vencimento": "",
+                "pagamento": "2026-05-10",
+                "bruto": 1500.00,
+                "base": 1500.00,
+                "inss": 165.00,
+                "ir": 0.0,
+                "pcc": 69.75,
+                "natureza": "15044",
+                "cod_servico": "100000020"
+            })
+            
+        return {"sucesso": True, "qtd": len(lista_de_notas), "notas": lista_de_notas}
+
+    except Exception as e:
+        return {"sucesso": False, "erro": str(e)}
