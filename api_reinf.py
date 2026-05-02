@@ -158,6 +158,53 @@ def assinar_xades_icp_brasil(xml_str, chave_privada, cert_der):
 
     return xml_root
 
+    # ---------------------------------------------------------
+# ASSINADOR ESPECÍFICO PARA A PREFEITURA DE SP (XMLDSig Padrão)
+# ---------------------------------------------------------
+def assinar_xml_sp(xml_str, chave_privada, cert_der):
+    xml_root = etree.fromstring(xml_str.encode('utf-8'))
+    xml_c14n = etree.tostring(xml_root, method="c14n", exclusive=True, with_comments=False)
+    digest_xml = base64.b64encode(hashlib.sha1(xml_c14n).digest()).decode('utf-8')
+
+    cert_b64 = base64.b64encode(cert_der).decode('utf-8')
+
+    # A Prefeitura de SP usa o padrão SHA1 antigo
+    signature_xml = f'''<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
+      <SignedInfo>
+        <CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
+        <SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1" />
+        <Reference URI="">
+          <Transforms>
+            <Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature" />
+            <Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
+          </Transforms>
+          <DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1" />
+          <DigestValue>{digest_xml}</DigestValue>
+        </Reference>
+      </SignedInfo>
+      <SignatureValue>DUMMY_SIGNATURE_VALUE</SignatureValue>
+      <KeyInfo>
+        <X509Data>
+          <X509Certificate>{cert_b64}</X509Certificate>
+        </X509Data>
+      </KeyInfo>
+    </Signature>'''
+
+    xml_str_com_sig = xml_str.replace('</PedidoConsultaNFeRecebidas>', f'{signature_xml}</PedidoConsultaNFeRecebidas>')
+    xml_root_sig = etree.fromstring(xml_str_com_sig.encode('utf-8'))
+
+    signed_info_node = xml_root_sig.find('.//{http://www.w3.org/2000/09/xmldsig#}SignedInfo')
+    signed_info_c14n = etree.tostring(signed_info_node, method="c14n", exclusive=True, with_comments=False)
+    
+    # Assina com SHA1 (Exigência de SP)
+    signature_bytes = chave_privada.sign(signed_info_c14n, padding.PKCS1v15(), hashes.SHA1())
+    signature_b64 = base64.b64encode(signature_bytes).decode('utf-8')
+
+    sig_value_node = xml_root_sig.find('.//{http://www.w3.org/2000/09/xmldsig#}SignatureValue')
+    sig_value_node.text = signature_b64
+
+    return etree.tostring(xml_root_sig, encoding='utf-8').decode('utf-8')
+
 # 3. A ROTA DE TRANSMISSÃO
 @app.post("/transmitir")
 def transmitir_xml(lote: LoteReinf):
@@ -313,45 +360,150 @@ class ConsultaNotas(BaseModel):
 @app.post("/buscar_notas")
 def buscar_notas(consulta: ConsultaNotas):
     try:
-        # AQUI VAMOS FAZER UM TESTE DE "PING" SEGURO ANTES DE BATER NA RECEITA
-        # Se a senha for vazia, nós barramos na hora pra não dar Crash
-        if not consulta.cert_senha:
-            return {"sucesso": False, "erro": "A senha do certificado está vazia na planilha."}
-        
-        # Como o certificado só é necessário para o e-CAC de verdade (ou WebService), 
-        # e aqui estamos simulando, eu vou apenas validar se ele enviou o Base64.
-        if not consulta.cert_b64 or len(consulta.cert_b64) < 100:
-            return {"sucesso": False, "erro": "O arquivo .pfx não foi lido corretamente no Google Drive."}
+        if not consulta.cert_senha or not consulta.cert_b64:
+            return {"sucesso": False, "erro": "Certificado A1 ou senha ausentes."}
 
-        # Inicializa a lista de notas vazia
+        # 1. Pega as credenciais da memória
+        chave_privada, cert_der, cert_pem, chave_pem = preparar_credenciais_memoria(consulta.cert_b64, consulta.cert_senha)
+        
+        # Salva chaves temporárias para a conexão HTTPS mTLS
+        caminho_cert = f"/tmp/cert_busca_{consulta.cnpj_tomador}.pem"
+        caminho_key = f"/tmp/key_busca_{consulta.cnpj_tomador}.pem"
+        if os.name == 'nt':
+            caminho_cert, caminho_key = f"cert_busca_{consulta.cnpj_tomador}.pem", f"key_busca_{consulta.cnpj_tomador}.pem"
+
+        with open(caminho_cert, 'wb') as f: f.write(cert_pem)
+        with open(caminho_key, 'wb') as f: f.write(chave_pem)
+
         lista_de_notas = list()
         
-        # Simulador: Se a busca for em SP, ele devolve uma nota de teste
+        # ========================================================
+        # MOTOR 1: PREFEITURA DE SÃO PAULO (CAPITAL)
+        # ========================================================
         if consulta.portal == "SP_CAPITAL":
+            if not consulta.ccm:
+                return {"sucesso": False, "erro": "CCM obrigatório para Prefeitura de SP."}
+
+            # Monta o Pedido de Busca de Notas Tomadas (As que emitiram contra o Condomínio)
+            pedido_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<PedidoConsultaNFeRecebidas xmlns="http://www.prefeitura.sp.gov.br/nfe">
+  <CPFCNPJ><CNPJ>{consulta.cnpj_tomador}</CNPJ></CPFCNPJ>
+  <Inscricao>{consulta.ccm}</Inscricao>
+  <dtInicio>{consulta.data_ini}</dtInicio>
+  <dtFim>{consulta.data_fim}</dtFim>
+</PedidoConsultaNFeRecebidas>'''
+
+            # Assina o pedido
+            pedido_assinado = assinar_xml_sp(pedido_xml, chave_privada, cert_der)
             
-            # (Futuramente aqui entrará a conexão SOAP da Prefeitura de SP)
+            # Limpa o XML assinado (tira quebras de linha para o Envelope SOAP aceitar)
+            pedido_assinado_limpo = pedido_assinado.replace('\n', '').replace('\r', '')
+
+            # Envelope SOAP do Governo
+            soap_envelope = f'''<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <ConsultaNFeRecebidas xmlns="http://www.prefeitura.sp.gov.br/nfe">
+      <versaoSchema>1</versaoSchema>
+      <mensagemXML><![CDATA[{pedido_assinado_limpo}]]></mensagemXML>
+    </ConsultaNFeRecebidas>
+  </soap:Body>
+</soap:Envelope>'''
+
+            url_sp = "https://nfe.prefeitura.sp.gov.br/ws/lotenfe.asmx"
+            headers_sp = {
+                "Content-Type": "text/xml; charset=utf-8",
+                "SOAPAction": '"http://www.prefeitura.sp.gov.br/nfe/ws/consultaNFeRecebidas"'
+            }
+
+            # Dispara para a Prefeitura de SP
+            res = requests.post(url_sp, data=soap_envelope.encode('utf-8'), headers=headers_sp, cert=(caminho_cert, caminho_key))
             
-            lista_de_notas.append({
-                "nf": "999",
-                "serie": "SN",
-                "cnpj_prestador": "10611620000110",
-                "nome_prestador": f"ASTERSEG (Nota Simulada - CCM: {consulta.ccm})",
-                "emissao": consulta.data_ini, 
-                "vencimento": consulta.data_fim,
-                "pagamento": consulta.data_fim,
-                "bruto": 1500.00,
-                "base": 1500.00,
-                "inss": 165.00,
-                "ir": 0.0,
-                "pcc": 69.75,
-                "natureza": "15044",
-                "cod_servico": "100000020"
-            })
+            if res.status_code != 200:
+                return {"sucesso": False, "erro": f"Erro SP: {res.status_code} - {res.text}"}
+
+            # Extrai o XML de retorno que vem "escondido" dentro do SOAP (CDATA)
+            soap_resp = etree.fromstring(res.content)
+            xml_retorno_str = soap_resp.xpath('//default:RetornoXML/text()', namespaces={'default': 'http://www.prefeitura.sp.gov.br/nfe'})
             
+            if not xml_retorno_str:
+                return {"sucesso": False, "erro": "A prefeitura não devolveu o XML esperado."}
+
+            xml_retorno = etree.fromstring(xml_retorno_str[0].encode('utf-8'))
+            
+            # Verifica se a prefeitura mandou erro (ex: data inválida)
+            erros_sp = xml_retorno.xpath('//default:Alerta', namespaces={'default': 'http://www.prefeitura.sp.gov.br/nfe'})
+            if erros_sp:
+                msg_alerta = erros_sp[0].xpath('default:Descricao/text()', namespaces={'default': 'http://www.prefeitura.sp.gov.br/nfe'})[0]
+                # Se for "Nenhuma NFe encontrada", é só um aviso, não é erro grave
+                if "Nenhuma" in msg_alerta:
+                    pass
+                else:
+                    return {"sucesso": False, "erro": f"Prefeitura SP recusou: {msg_alerta}"}
+
+            # Varre as notas recebidas
+            nfs = xml_retorno.xpath('//default:NFe', namespaces={'default': 'http://www.prefeitura.sp.gov.br/nfe'})
+            
+            for nf in nfs:
+                ns = {'d': 'http://www.prefeitura.sp.gov.br/nfe'}
+                
+                # Dados Básicos
+                num_nf = nf.xpath('d:ChaveNFe/d:NumeroNFe/text()', namespaces=ns)[0]
+                emissao_full = nf.xpath('d:DataEmissaoNFe/text()', namespaces=ns)[0]
+                emissao_dia = emissao_full[:10] # Pega só YYYY-MM-DD
+                
+                # Prestador
+                cnpj_prestador = nf.xpath('d:ChaveNFe/d:InscricaoPrestador/text()', namespaces=ns)
+                cnpj_prestador = cnpj_prestador[0] if cnpj_prestador else "00000000000000"
+                nome_prestador = nf.xpath('d:RazaoSocialPrestador/text()', namespaces=ns)
+                nome_prestador = nome_prestador[0] if nome_prestador else "PRESTADOR DESCONHECIDO"
+                
+                # Valores Financeiros
+                vlr_servicos = float(nf.xpath('d:ValorServicos/text()', namespaces=ns)[0])
+                vlr_inss = float(nf.xpath('d:ValorINSS/text()', namespaces=ns)[0] if nf.xpath('d:ValorINSS/text()', namespaces=ns) else 0)
+                vlr_ir = float(nf.xpath('d:ValorIR/text()', namespaces=ns)[0] if nf.xpath('d:ValorIR/text()', namespaces=ns) else 0)
+                vlr_pis = float(nf.xpath('d:ValorPIS/text()', namespaces=ns)[0] if nf.xpath('d:ValorPIS/text()', namespaces=ns) else 0)
+                vlr_cofins = float(nf.xpath('d:ValorCOFINS/text()', namespaces=ns)[0] if nf.xpath('d:ValorCOFINS/text()', namespaces=ns) else 0)
+                vlr_csll = float(nf.xpath('d:ValorCSLL/text()', namespaces=ns)[0] if nf.xpath('d:ValorCSLL/text()', namespaces=ns) else 0)
+                
+                # SP envia ISS Retido, precisamos checar se é a base
+                vlr_base = vlr_servicos # Assumimos bruto como base inicial
+                
+                # Natureza e Serviço (Pega o código da prefeitura)
+                cod_servico = nf.xpath('d:CodigoServico/text()', namespaces=ns)
+                cod_servico = cod_servico[0] if cod_servico else ""
+
+                lista_de_notas.append({
+                    "nf": num_nf,
+                    "serie": "SN",
+                    "cnpj_prestador": cnpj_prestador,
+                    "nome_prestador": nome_prestador,
+                    "emissao": emissao_dia,
+                    "vencimento": emissao_dia, # Por padrão, coloca a mesma data
+                    "pagamento": emissao_dia,
+                    "bruto": vlr_servicos,
+                    "base": vlr_base,
+                    "inss": vlr_inss,
+                    "ir": vlr_ir,
+                    "pcc": round(vlr_pis + vlr_cofins + vlr_csll, 2), # O PCC é a soma dos 3
+                    "natureza": "15044", # Natureza padrão (será auditada no painel)
+                    "cod_servico": cod_servico
+                })
+
+        # ========================================================
+        # MOTOR 2: PORTAL NACIONAL (Em construção)
+        # ========================================================
         elif consulta.portal == "NACIONAL":
             return {"sucesso": False, "erro": "A rota do Portal Nacional ainda está em construção."}
+
+        # Apaga certificados temporários
+        try:
+            os.remove(caminho_cert)
+            os.remove(caminho_key)
+        except:
+            pass
 
         return {"sucesso": True, "qtd": len(lista_de_notas), "notas": lista_de_notas}
 
     except Exception as e:
-        return {"sucesso": False, "erro": f"Erro fatal no Python: {str(e)}"}
+        return {"sucesso": False, "erro": f"Erro fatal no Extrator: {str(e)}"}
