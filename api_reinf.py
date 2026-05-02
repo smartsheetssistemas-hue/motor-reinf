@@ -210,7 +210,8 @@ def assinar_xml_sp(xml_str, chave_privada, cert_der):
   </ds:KeyInfo>
 </ds:Signature>'''
 
-    xml_str_com_sig = xml_str.replace('</p1:PedidoConsultaNFeRecebidas>', f'{signature_xml}</p1:PedidoConsultaNFeRecebidas>')
+    # 5. Injeta a assinatura provisória dentro do XML (Antes da tag de fechamento limpa)
+    xml_str_com_sig = xml_str.replace('</PedidoConsultaNFeRecebidas>', f'{signature_xml}</PedidoConsultaNFeRecebidas>')
     xml_root_sig = etree.fromstring(xml_str_com_sig.encode('utf-8'))
 
     signed_info_node = xml_root_sig.xpath('.//*[local-name()="SignedInfo"]')[0]
@@ -367,16 +368,16 @@ def buscar_notas(consulta: ConsultaNotas):
             with open(caminho_cert, 'wb') as f: f.write(cert_pem)
             with open(caminho_key, 'wb') as f: f.write(chave_pem)
 
-            # 2. Monta e Assina o Pedido
+            # 2. Monta o Pedido (Padrão Cru, sem prefixos, exigência de SP)
             pedido_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<p1:PedidoConsultaNFeRecebidas xmlns:p1="http://www.prefeitura.sp.gov.br/nfe">
+<PedidoConsultaNFeRecebidas xmlns="http://www.prefeitura.sp.gov.br/nfe">
   <CPFCNPJ>
     <CNPJ>{consulta.cnpj_tomador.zfill(14)}</CNPJ>
   </CPFCNPJ>
   <Inscricao>{consulta.ccm.zfill(8)}</Inscricao>
   <dtInicio>{consulta.data_ini}</dtInicio>
   <dtFim>{consulta.data_fim}</dtFim>
-</p1:PedidoConsultaNFeRecebidas>'''
+</PedidoConsultaNFeRecebidas>'''
 
             pedido_assinado = assinar_xml_sp(pedido_xml, chave_privada, cert_der)
             pedido_assinado_limpo = pedido_assinado.replace('\n', '').replace('\r', '')
