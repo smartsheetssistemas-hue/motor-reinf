@@ -3,7 +3,6 @@ import re
 import base64
 import hashlib
 import requests
-import zeep
 from datetime import datetime, timezone
 from lxml import etree
 from cryptography import x509
@@ -179,7 +178,7 @@ def assinar_xades_icp_brasil(xml_str, chave_privada, cert_der):
     return xml_root
 
 # =========================================================
-# ASSINADOR ESPECÍFICO PARA A PREFEITURA DE SP (XMLDSig Padrão)
+# ASSINADOR ESPECÍFICO PARA A PREFEITURA DE SP
 # =========================================================
 def assinar_xml_sp(xml_str, chave_privada, cert_der):
     xml_str = xml_str.replace('\n', '').replace('\r', '')
@@ -189,29 +188,29 @@ def assinar_xml_sp(xml_str, chave_privada, cert_der):
 
     cert_b64 = base64.b64encode(cert_der).decode('utf-8')
 
-    signature_xml = f'''<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
-  <ds:SignedInfo>
-    <ds:CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
-    <ds:SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1" />
-    <ds:Reference URI="">
-      <ds:Transforms>
-        <ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature" />
-        <ds:Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
-      </ds:Transforms>
-      <ds:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1" />
-      <ds:DigestValue>{digest_xml}</ds:DigestValue>
-    </ds:Reference>
-  </ds:SignedInfo>
-  <ds:SignatureValue>DUMMY_SIGNATURE_VALUE</ds:SignatureValue>
-  <ds:KeyInfo>
-    <ds:X509Data>
-      <ds:X509Certificate>{cert_b64}</ds:X509Certificate>
-    </ds:X509Data>
-  </ds:KeyInfo>
-</ds:Signature>'''
+    signature_xml = f'''<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
+  <SignedInfo>
+    <CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
+    <SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1" />
+    <Reference URI="">
+      <Transforms>
+        <Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature" />
+        <Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
+      </Transforms>
+      <DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1" />
+      <DigestValue>{digest_xml}</DigestValue>
+    </Reference>
+  </SignedInfo>
+  <SignatureValue>DUMMY_SIGNATURE_VALUE</SignatureValue>
+  <KeyInfo>
+    <X509Data>
+      <X509Certificate>{cert_b64}</X509Certificate>
+    </X509Data>
+  </KeyInfo>
+</Signature>'''
 
-    # 5. Injeta a assinatura provisória dentro do XML (Antes da tag de fechamento limpa)
-    xml_str_com_sig = xml_str.replace('</PedidoConsultaNFeRecebidas>', f'{signature_xml}</PedidoConsultaNFeRecebidas>')
+    # AQUI ESTÁ A CORREÇÃO DE TAG DO MANUAL QUE APLICAMOS AGORA!
+    xml_str_com_sig = xml_str.replace('</p1:PedidoConsultaNFePeriodo>', f'{signature_xml}</p1:PedidoConsultaNFePeriodo>')
     xml_root_sig = etree.fromstring(xml_str_com_sig.encode('utf-8'))
 
     signed_info_node = xml_root_sig.xpath('.//*[local-name()="SignedInfo"]')[0]
@@ -224,7 +223,6 @@ def assinar_xml_sp(xml_str, chave_privada, cert_der):
     sig_value_node.text = signature_b64
 
     return etree.tostring(xml_root_sig, encoding='utf-8').decode('utf-8')
-
 
 # =========================================================
 # ROTAS DO E-CAC (Transmissão e Consulta)
@@ -337,7 +335,7 @@ def consultar_xml(consulta: ConsultaReinf):
         return {"sucesso": False, "erro": f"Erro Interno da API: {str(e)}"}
 
 # =========================================================
-# ROTA: EXTRATOR UNIVERSAL DE NOTAS FISCAIS (MODO ESPIÃO SP)
+# ROTA: EXTRATOR UNIVERSAL DE NOTAS FISCAIS
 # =========================================================
 @app.post("/buscar_notas")
 def buscar_notas(consulta: ConsultaNotas):
@@ -352,14 +350,10 @@ def buscar_notas(consulta: ConsultaNotas):
         
         lista_de_notas = list()
         
-        # ========================================================
-        # MOTOR 1: PREFEITURA DE SÃO PAULO (CAPITAL) VIA ZEEP SOAP
-        # ========================================================
         if consulta.portal == "SP_CAPITAL":
             if not consulta.ccm:
                 return {"sucesso": False, "erro": "CCM obrigatório para Prefeitura de SP."}
 
-            # 1. Salva as chaves para a conexão
             caminho_cert = f"/tmp/cert_busca_{consulta.cnpj_tomador}.pem"
             caminho_key = f"/tmp/key_busca_{consulta.cnpj_tomador}.pem"
             if os.name == 'nt':
@@ -368,128 +362,84 @@ def buscar_notas(consulta: ConsultaNotas):
             with open(caminho_cert, 'wb') as f: f.write(cert_pem)
             with open(caminho_key, 'wb') as f: f.write(chave_pem)
 
-            # 2. Monta o Pedido (Padrão Cru, sem prefixos, exigência de SP)
+            dt_ini = consulta.data_ini
+            dt_fim = consulta.data_fim
+
+            # ====================================================
+            # MONTAGEM RIGOROSA BASEADA NO MANUAL (PAG 54 E 56)
+            # ====================================================
             pedido_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<PedidoConsultaNFeRecebidas xmlns="http://www.prefeitura.sp.gov.br/nfe">
+<p1:PedidoConsultaNFePeriodo xmlns:p1="http://www.prefeitura.sp.gov.br/nfe">
+  <Cabecalho Versao="1">
+    <CPFCNPJRemetente>
+      <CNPJ>{consulta.cnpj_tomador.zfill(14)}</CNPJ>
+    </CPFCNPJRemetente>
+  </Cabecalho>
   <CPFCNPJ>
     <CNPJ>{consulta.cnpj_tomador.zfill(14)}</CNPJ>
   </CPFCNPJ>
   <Inscricao>{consulta.ccm.zfill(8)}</Inscricao>
-  <dtInicio>{consulta.data_ini}</dtInicio>
-  <dtFim>{consulta.data_fim}</dtFim>
-</PedidoConsultaNFeRecebidas>'''
+  <dtInicio>{dt_ini}</dtInicio>
+  <dtFim>{dt_fim}</dtFim>
+  <NumeroPagina>1</NumeroPagina>
+</p1:PedidoConsultaNFePeriodo>'''
 
             pedido_assinado = assinar_xml_sp(pedido_xml, chave_privada, cert_der)
             pedido_assinado_limpo = pedido_assinado.replace('\n', '').replace('\r', '')
 
-            # 3. CONEXÃO SOAP PROFISSIONAL (ZEEP)
-            try:
-                import urllib3
-                from zeep.transports import Transport
-                from requests import Session
-                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-                
-                # Prepara o "carteiro" (Session) com o Certificado Digital A1
-                session = Session()
-                session.cert = (caminho_cert, caminho_key)
-                session.verify = False
-                transport = Transport(session=session)
-                
-                # Lê o Manual (WSDL) direto da Prefeitura
-                wsdl_url = "https://nfe.prefeitura.sp.gov.br/ws/lotenfe.asmx?wsdl"
-                cliente_soap = zeep.Client(wsdl=wsdl_url, transport=transport)
-                
-                # Dispara a função ConsultaNFeRecebidas do Governo
-                # Passando a "versaoSchema=1" e a "mensagemXML"
-                resposta_sp = cliente_soap.service.ConsultaNFeRecebidas(1, pedido_assinado_limpo)
-                
-            except Exception as ez:
-                return {"sucesso": False, "erro": f"Erro no Cliente SOAP: {str(ez)}"}
+            import html
+            pedido_escapado = html.escape(pedido_assinado_limpo)
 
-            finally:
-                try:
-                    os.remove(caminho_cert)
-                    os.remove(caminho_key)
-                except: pass
+            soap_envelope = f'''<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <ConsultaNFeRecebidas xmlns="http://www.prefeitura.sp.gov.br/nfe">
+      <versaoSchema>1</versaoSchema>
+      <mensagemXML>{pedido_escapado}</mensagemXML>
+    </ConsultaNFeRecebidas>
+  </soap:Body>
+</soap:Envelope>'''
 
-            # 4. TRATA A RESPOSTA (O Zeep já devolve o XML limpo!)
-            if not resposta_sp:
-                return {"sucesso": False, "erro": "A prefeitura devolveu uma resposta nula."}
+            url_sp = "https://nfe.prefeitura.sp.gov.br/ws/lotenfe.asmx"
+            headers_sp = {
+                "Content-Type": "text/xml; charset=utf-8",
+                "SOAPAction": '"http://www.prefeitura.sp.gov.br/nfe/ws/consultaNFeRecebidas"'
+            }
 
-            # Como o Zeep já extraiu o XML pra gente, a gente só precisa ler
-            xml_retorno = etree.fromstring(resposta_sp.encode('utf-8'))
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             
-            # --- MODO DE INVESTIGAÇÃO (DEBUG) ---
-            # Vamos cuspir o que o Zeep conseguiu ler da Prefeitura!
-            return {"sucesso": False, "erro": f"XML DA PREFEITURA VIA ZEEP: {resposta_sp[:800]}"}
+            res = requests.post(url_sp, data=soap_envelope.encode('utf-8'), headers=headers_sp, cert=(caminho_cert, caminho_key), verify=False)
+
+            try:
+                os.remove(caminho_cert)
+                os.remove(caminho_key)
+            except: pass
+
+            if res.status_code != 200:
+                erro_limpo = "Erro desconhecido HTTP " + str(res.status_code)
+                try:
+                    soap_erro = etree.fromstring(res.content)
+                    msg_soap = soap_erro.xpath('//*[local-name()="faultstring"]/text()')
+                    if msg_soap: erro_limpo = msg_soap[0]
+                except:
+                    erro_limpo = res.text[:200]
+                return {"sucesso": False, "erro": f"Recusado pela Prefeitura: {erro_limpo}"}
+
+            try:
+                soap_resp = etree.fromstring(res.content)
+            except:
+                return {"sucesso": False, "erro": "A prefeitura não retornou um XML válido. Retorno: " + res.text[:100]}
+
+            xml_retorno_str = soap_resp.xpath('//*[local-name()="RetornoXML"]/text()')
             
             if not xml_retorno_str:
                 erros_api = soap_resp.xpath('//*[local-name()="Erro"]//*[local-name()="Descricao"]/text()')
                 if erros_api: return {"sucesso": False, "erro": f"Erro API SP: {erros_api[0]}"}
                 return {"sucesso": True, "qtd": 0, "notas": []} 
 
-            # Descompacta o retorno
-            xml_retorno = etree.fromstring(xml_retorno_str[0].encode('utf-8'))
-            
-            # Checa os Alertas da Prefeitura
-            erros_sp = xml_retorno.xpath('//*[local-name()="Alerta"]')
-            if erros_sp:
-                msg_alerta = erros_sp[0].xpath('.//*[local-name()="Descricao"]/text()')[0]
-                if "Nenhuma NFe" in msg_alerta or "Nenhum" in msg_alerta:
-                    return {"sucesso": True, "qtd": 0, "notas": []}
-                else:
-                    return {"sucesso": False, "erro": f"Prefeitura recusou: {msg_alerta}"}
-
-            # Varre as notas recebidas
-            nfs = xml_retorno.xpath('//*[local-name()="NFe"]')
-            
-            for nf in nfs:
-                num_nf = nf.xpath('.//*[local-name()="NumeroNFe"]/text()')[0]
-                emissao_full = nf.xpath('.//*[local-name()="DataEmissaoNFe"]/text()')[0]
-                emissao_dia = emissao_full[:10]
-                
-                cnpj_p = nf.xpath('.//*[local-name()="InscricaoPrestador"]/text()')
-                cnpj_prestador = cnpj_p[0] if cnpj_p else "00000000000000"
-                
-                nome_p = nf.xpath('.//*[local-name()="RazaoSocialPrestador"]/text()')
-                nome_prestador = nome_p[0] if nome_p else "PRESTADOR DESCONHECIDO"
-                
-                v_bruto = float(nf.xpath('.//*[local-name()="ValorServicos"]/text()')[0])
-                
-                v_inss = nf.xpath('.//*[local-name()="ValorINSS"]/text()')
-                v_inss = float(v_inss[0]) if v_inss else 0.0
-                
-                v_ir = nf.xpath('.//*[local-name()="ValorIR"]/text()')
-                v_ir = float(v_ir[0]) if v_ir else 0.0
-                
-                v_pis = nf.xpath('.//*[local-name()="ValorPIS"]/text()')
-                v_pis = float(v_pis[0]) if v_pis else 0.0
-                
-                v_cof = nf.xpath('.//*[local-name()="ValorCOFINS"]/text()')
-                v_cof = float(v_cof[0]) if v_cof else 0.0
-                
-                v_csll = nf.xpath('.//*[local-name()="ValorCSLL"]/text()')
-                v_csll = float(v_csll[0]) if v_csll else 0.0
-
-                cod = nf.xpath('.//*[local-name()="CodigoServico"]/text()')
-                cod_servico = cod[0] if cod else ""
-
-                lista_de_notas.append({
-                    "nf": num_nf,
-                    "serie": "SN",
-                    "cnpj_prestador": cnpj_prestador,
-                    "nome_prestador": nome_prestador,
-                    "emissao": emissao_dia,
-                    "vencimento": emissao_dia, 
-                    "pagamento": emissao_dia,
-                    "bruto": v_bruto,
-                    "base": v_bruto,
-                    "inss": v_inss,
-                    "ir": v_ir,
-                    "pcc": round(v_pis + v_cof + v_csll, 2),
-                    "natureza": "15044", 
-                    "cod_servico": cod_servico
-                })
+            # MODO ESPIÃO ATIVADO! VAI CUSPIR O XML NA TELA DO GOOGLE SHEETS!
+            return {"sucesso": False, "erro": f"XML DA PREFEITURA SUCESSO: {xml_retorno_str[0][:800]}"}
 
         elif consulta.portal == "NACIONAL":
             return {"sucesso": False, "erro": "A rota do Portal Nacional ainda está em construção."}
