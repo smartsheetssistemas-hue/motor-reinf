@@ -384,94 +384,100 @@ def buscar_notas(consulta: ConsultaNotas):
             if not consulta.ccm:
                 return {"sucesso": False, "erro": "CCM obrigatório para Prefeitura de SP."}
 
-            # Monta o Pedido de Busca de Notas Tomadas (As que emitiram contra o Condomínio)
-            pedido_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<PedidoConsultaNFeRecebidas xmlns="http://www.prefeitura.sp.gov.br/nfe">
-  <CPFCNPJ><CNPJ>{consulta.cnpj_tomador}</CNPJ></CPFCNPJ>
-  <Inscricao>{consulta.ccm}</Inscricao>
-  <dtInicio>{consulta.data_ini}</dtInicio>
-  <dtFim>{consulta.data_fim}</dtFim>
-</PedidoConsultaNFeRecebidas>'''
+            # A Prefeitura de SP não busca por "data de emissão", e sim por "Data do Fato".
+            # Garante formato YYYY-MM-DD
+            dt_ini = consulta.data_ini
+            dt_fim = consulta.data_fim
 
-            # Assina o pedido
+            # Monta o Pedido
+            pedido_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<p1:PedidoConsultaNFeRecebidas xmlns:p1="http://www.prefeitura.sp.gov.br/nfe">
+  <CPFCNPJ><CNPJ>{consulta.cnpj_tomador.zfill(14)}</CNPJ></CPFCNPJ>
+  <Inscricao>{consulta.ccm.zfill(8)}</Inscricao>
+  <dtInicio>{dt_ini}</dtInicio>
+  <dtFim>{dt_fim}</dtFim>
+</p1:PedidoConsultaNFeRecebidas>'''
+
             pedido_assinado = assinar_xml_sp(pedido_xml, chave_privada, cert_der)
-            
-            # Limpa o XML assinado (tira quebras de linha para o Envelope SOAP aceitar)
             pedido_assinado_limpo = pedido_assinado.replace('\n', '').replace('\r', '')
 
-            # Envelope SOAP do Governo
+            # Envelope SOAP exigido pela Prefeitura de SP
             soap_envelope = f'''<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-  <soap:Body>
-    <ConsultaNFeRecebidas xmlns="http://www.prefeitura.sp.gov.br/nfe">
-      <versaoSchema>1</versaoSchema>
-      <mensagemXML><![CDATA[{pedido_assinado_limpo}]]></mensagemXML>
-    </ConsultaNFeRecebidas>
-  </soap:Body>
-</soap:Envelope>'''
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:nfe="http://www.prefeitura.sp.gov.br/nfe">
+   <soapenv:Header/>
+   <soapenv:Body>
+      <nfe:ConsultaNFeRecebidas>
+         <versaoSchema>1</versaoSchema>
+         <mensagemXML><![CDATA[{pedido_assinado_limpo}]]></mensagemXML>
+      </nfe:ConsultaNFeRecebidas>
+   </soapenv:Body>
+</soapenv:Envelope>'''
 
             url_sp = "https://nfe.prefeitura.sp.gov.br/ws/lotenfe.asmx"
             headers_sp = {
                 "Content-Type": "text/xml; charset=utf-8",
-                "SOAPAction": '"http://www.prefeitura.sp.gov.br/nfe/ws/consultaNFeRecebidas"'
+                "SOAPAction": "http://www.prefeitura.sp.gov.br/nfe/ws/consultaNFeRecebidas"
             }
 
-            # Dispara para a Prefeitura de SP
+            # Dispara
             res = requests.post(url_sp, data=soap_envelope.encode('utf-8'), headers=headers_sp, cert=(caminho_cert, caminho_key))
             
             if res.status_code != 200:
-                return {"sucesso": False, "erro": f"Erro SP: {res.status_code} - {res.text}"}
+                return {"sucesso": False, "erro": f"Erro de comunicação com a Prefeitura: {res.status_code}\n{res.text}"}
 
-            # Extrai o XML de retorno que vem "escondido" dentro do SOAP (CDATA)
+            # Extração Cautelosa do Retorno SOAP
             soap_resp = etree.fromstring(res.content)
-            xml_retorno_str = soap_resp.xpath('//default:RetornoXML/text()', namespaces={'default': 'http://www.prefeitura.sp.gov.br/nfe'})
+            xml_retorno_str = soap_resp.xpath('//*[local-name()="RetornoXML"]/text()')
             
             if not xml_retorno_str:
-                return {"sucesso": False, "erro": "A prefeitura não devolveu o XML esperado."}
+                return {"sucesso": True, "qtd": 0, "notas": []} # Não deu erro, mas não veio XML
 
             xml_retorno = etree.fromstring(xml_retorno_str[0].encode('utf-8'))
             
-            # Verifica se a prefeitura mandou erro (ex: data inválida)
-            erros_sp = xml_retorno.xpath('//default:Alerta', namespaces={'default': 'http://www.prefeitura.sp.gov.br/nfe'})
+            # Checa os Alertas da Prefeitura (como: Sem notas no período)
+            erros_sp = xml_retorno.xpath('//*[local-name()="Alerta"]')
             if erros_sp:
-                msg_alerta = erros_sp[0].xpath('default:Descricao/text()', namespaces={'default': 'http://www.prefeitura.sp.gov.br/nfe'})[0]
-                # Se for "Nenhuma NFe encontrada", é só um aviso, não é erro grave
-                if "Nenhuma" in msg_alerta:
-                    pass
+                msg_alerta = erros_sp[0].xpath('.//*[local-name()="Descricao"]/text()')[0]
+                if "Nenhuma NFe" in msg_alerta or "Nenhum" in msg_alerta:
+                    return {"sucesso": True, "qtd": 0, "notas": []}
                 else:
-                    return {"sucesso": False, "erro": f"Prefeitura SP recusou: {msg_alerta}"}
+                    return {"sucesso": False, "erro": f"Prefeitura recusou a busca: {msg_alerta}"}
 
-            # Varre as notas recebidas
-            nfs = xml_retorno.xpath('//default:NFe', namespaces={'default': 'http://www.prefeitura.sp.gov.br/nfe'})
+            # Lê e decodifica cada Nota
+            nfs = xml_retorno.xpath('//*[local-name()="NFe"]')
             
             for nf in nfs:
-                ns = {'d': 'http://www.prefeitura.sp.gov.br/nfe'}
+                # O XPATH usa local-name() para burlar o namespace infernal que a prefeitura manda
+                num_nf = nf.xpath('.//*[local-name()="NumeroNFe"]/text()')[0]
+                emissao_full = nf.xpath('.//*[local-name()="DataEmissaoNFe"]/text()')[0]
+                emissao_dia = emissao_full[:10]
                 
-                # Dados Básicos
-                num_nf = nf.xpath('d:ChaveNFe/d:NumeroNFe/text()', namespaces=ns)[0]
-                emissao_full = nf.xpath('d:DataEmissaoNFe/text()', namespaces=ns)[0]
-                emissao_dia = emissao_full[:10] # Pega só YYYY-MM-DD
+                cnpj_p = nf.xpath('.//*[local-name()="InscricaoPrestador"]/text()')
+                cnpj_prestador = cnpj_p[0] if cnpj_p else "00000000000000"
                 
-                # Prestador
-                cnpj_prestador = nf.xpath('d:ChaveNFe/d:InscricaoPrestador/text()', namespaces=ns)
-                cnpj_prestador = cnpj_prestador[0] if cnpj_prestador else "00000000000000"
-                nome_prestador = nf.xpath('d:RazaoSocialPrestador/text()', namespaces=ns)
-                nome_prestador = nome_prestador[0] if nome_prestador else "PRESTADOR DESCONHECIDO"
+                nome_p = nf.xpath('.//*[local-name()="RazaoSocialPrestador"]/text()')
+                nome_prestador = nome_p[0] if nome_p else "PRESTADOR DESCONHECIDO"
                 
-                # Valores Financeiros
-                vlr_servicos = float(nf.xpath('d:ValorServicos/text()', namespaces=ns)[0])
-                vlr_inss = float(nf.xpath('d:ValorINSS/text()', namespaces=ns)[0] if nf.xpath('d:ValorINSS/text()', namespaces=ns) else 0)
-                vlr_ir = float(nf.xpath('d:ValorIR/text()', namespaces=ns)[0] if nf.xpath('d:ValorIR/text()', namespaces=ns) else 0)
-                vlr_pis = float(nf.xpath('d:ValorPIS/text()', namespaces=ns)[0] if nf.xpath('d:ValorPIS/text()', namespaces=ns) else 0)
-                vlr_cofins = float(nf.xpath('d:ValorCOFINS/text()', namespaces=ns)[0] if nf.xpath('d:ValorCOFINS/text()', namespaces=ns) else 0)
-                vlr_csll = float(nf.xpath('d:ValorCSLL/text()', namespaces=ns)[0] if nf.xpath('d:ValorCSLL/text()', namespaces=ns) else 0)
+                v_bruto = float(nf.xpath('.//*[local-name()="ValorServicos"]/text()')[0])
                 
-                # SP envia ISS Retido, precisamos checar se é a base
-                vlr_base = vlr_servicos # Assumimos bruto como base inicial
+                # Valores Implicitos (Se a tag não existir, o imposto é Zero)
+                v_inss = nf.xpath('.//*[local-name()="ValorINSS"]/text()')
+                v_inss = float(v_inss[0]) if v_inss else 0.0
                 
-                # Natureza e Serviço (Pega o código da prefeitura)
-                cod_servico = nf.xpath('d:CodigoServico/text()', namespaces=ns)
-                cod_servico = cod_servico[0] if cod_servico else ""
+                v_ir = nf.xpath('.//*[local-name()="ValorIR"]/text()')
+                v_ir = float(v_ir[0]) if v_ir else 0.0
+                
+                v_pis = nf.xpath('.//*[local-name()="ValorPIS"]/text()')
+                v_pis = float(v_pis[0]) if v_pis else 0.0
+                
+                v_cof = nf.xpath('.//*[local-name()="ValorCOFINS"]/text()')
+                v_cof = float(v_cof[0]) if v_cof else 0.0
+                
+                v_csll = nf.xpath('.//*[local-name()="ValorCSLL"]/text()')
+                v_csll = float(v_csll[0]) if v_csll else 0.0
+
+                cod = nf.xpath('.//*[local-name()="CodigoServico"]/text()')
+                cod_servico = cod[0] if cod else ""
 
                 lista_de_notas.append({
                     "nf": num_nf,
@@ -479,14 +485,14 @@ def buscar_notas(consulta: ConsultaNotas):
                     "cnpj_prestador": cnpj_prestador,
                     "nome_prestador": nome_prestador,
                     "emissao": emissao_dia,
-                    "vencimento": emissao_dia, # Por padrão, coloca a mesma data
+                    "vencimento": emissao_dia, 
                     "pagamento": emissao_dia,
-                    "bruto": vlr_servicos,
-                    "base": vlr_base,
-                    "inss": vlr_inss,
-                    "ir": vlr_ir,
-                    "pcc": round(vlr_pis + vlr_cofins + vlr_csll, 2), # O PCC é a soma dos 3
-                    "natureza": "15044", # Natureza padrão (será auditada no painel)
+                    "bruto": v_bruto,
+                    "base": v_bruto,
+                    "inss": v_inss,
+                    "ir": v_ir,
+                    "pcc": round(v_pis + v_cof + v_csll, 2),
+                    "natureza": "15044", 
                     "cod_servico": cod_servico
                 })
 
