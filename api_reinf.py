@@ -472,11 +472,16 @@ def buscar_notas(consulta: ConsultaNotas):
                 # Checa os Alertas da Prefeitura
             erros_sp = xml_retorno.xpath('//*[local-name()="Alerta"]')
             if erros_sp:
+                # O MODO ESPIÃO AGRESSIVO
                 msg_alerta = erros_sp[0].xpath('.//*[local-name()="Descricao"]/text()')[0]
-                
-                # MODO ESPIÃO: Devolve o XML original que a prefeitura mandou pra nós lermos!
-                # Limita a 800 caracteres para caber na tela do Sheets.
                 xml_bruto_resposta = xml_retorno_str[0][:800] 
+                
+                return {
+                    "sucesso": True, 
+                    "qtd": 0, 
+                    "msg_debug": f"⚠️ Alerta da Prefeitura: {msg_alerta}\n\nXML BRUTO DEVOLVIDO:\n{xml_bruto_resposta}",
+                    "notas": []
+                } 
                 
                 if "Nenhuma NFe" in msg_alerta or "Nenhum" in msg_alerta:
                     return {"sucesso": False, "erro": f"MODO ESPIÃO (Sem notas) -> {msg_alerta} ||| XML PREFEITURA: {xml_bruto_resposta}"}
