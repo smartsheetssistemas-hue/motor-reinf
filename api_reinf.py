@@ -350,6 +350,9 @@ def buscar_notas(consulta: ConsultaNotas):
         
         lista_de_notas = list()
         
+        # ========================================================
+        # MOTOR 1: PREFEITURA DE SÃO PAULO (CAPITAL) - FORÇA BRUTA CDATA
+        # ========================================================
         if consulta.portal == "SP_CAPITAL":
             if not consulta.ccm:
                 return {"sucesso": False, "erro": "CCM obrigatório para Prefeitura de SP."}
@@ -365,37 +368,36 @@ def buscar_notas(consulta: ConsultaNotas):
             dt_ini = consulta.data_ini
             dt_fim = consulta.data_fim
 
-            # ====================================================
-            # MONTAGEM RIGOROSA BASEADA NO MANUAL (PAG 54 E 56)
-            # ====================================================
-            pedido_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<p1:PedidoConsultaNFePeriodo xmlns:p1="http://www.prefeitura.sp.gov.br/nfe">
-  <Cabecalho Versao="1">
-    <CPFCNPJRemetente>
-      <CNPJ>{consulta.cnpj_tomador.zfill(14)}</CNPJ>
-    </CPFCNPJRemetente>
-  </Cabecalho>
-  <CPFCNPJ>
-    <CNPJ>{consulta.cnpj_tomador.zfill(14)}</CNPJ>
-  </CPFCNPJ>
-  <Inscricao>{consulta.ccm.zfill(8)}</Inscricao>
-  <dtInicio>{dt_ini}</dtInicio>
-  <dtFim>{dt_fim}</dtFim>
-  <NumeroPagina>1</NumeroPagina>
+            # O SEGREDO 1: SEM a tag <?xml version="1.0"?> no pedido interno
+            # O SEGREDO 2: Namespace p1 em todas as tags obrigatórias
+            pedido_xml = f'''<p1:PedidoConsultaNFePeriodo xmlns:p1="http://www.prefeitura.sp.gov.br/nfe">
+  <p1:Cabecalho Versao="1">
+    <p1:CPFCNPJRemetente>
+      <p1:CNPJ>{consulta.cnpj_tomador.zfill(14)}</p1:CNPJ>
+    </p1:CPFCNPJRemetente>
+  </p1:Cabecalho>
+  <p1:CPFCNPJ>
+    <p1:CNPJ>{consulta.cnpj_tomador.zfill(14)}</p1:CNPJ>
+  </p1:CPFCNPJ>
+  <p1:Inscricao>{consulta.ccm.zfill(8)}</p1:Inscricao>
+  <p1:dtInicio>{dt_ini}</p1:dtInicio>
+  <p1:dtFim>{dt_fim}</p1:dtFim>
+  <p1:NumeroPagina>1</p1:NumeroPagina>
 </p1:PedidoConsultaNFePeriodo>'''
 
+            # Assina a requisição
             pedido_assinado = assinar_xml_sp(pedido_xml, chave_privada, cert_der)
+            
+            # Limpeza extrema: tira quebras de linha para o CDATA engolir fácil
             pedido_assinado_limpo = pedido_assinado.replace('\n', '').replace('\r', '')
 
-            import html
-            pedido_escapado = html.escape(pedido_assinado_limpo)
-
+            # O SEGREDO 3: Envelope com CDATA exato, sem escape HTML
             soap_envelope = f'''<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
   <soap:Body>
     <ConsultaNFeRecebidas xmlns="http://www.prefeitura.sp.gov.br/nfe">
       <versaoSchema>1</versaoSchema>
-      <mensagemXML>{pedido_escapado}</mensagemXML>
+      <mensagemXML><![CDATA[{pedido_assinado_limpo}]]></mensagemXML>
     </ConsultaNFeRecebidas>
   </soap:Body>
 </soap:Envelope>'''
@@ -409,6 +411,7 @@ def buscar_notas(consulta: ConsultaNotas):
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             
+            # Envia a requisição forçando desativação de validação
             res = requests.post(url_sp, data=soap_envelope.encode('utf-8'), headers=headers_sp, cert=(caminho_cert, caminho_key), verify=False)
 
             try:
@@ -435,16 +438,12 @@ def buscar_notas(consulta: ConsultaNotas):
             
             if not xml_retorno_str:
                 erros_api = soap_resp.xpath('//*[local-name()="Erro"]//*[local-name()="Descricao"]/text()')
-                if erros_api: return {"sucesso": False, "erro": f"Erro API SP: {erros_api[0]}"}
+                if erros_api:
+                    return {"sucesso": False, "erro": f"Erro API SP: {erros_api[0]}"}
                 return {"sucesso": True, "qtd": 0, "notas": []} 
 
-            # MODO ESPIÃO ATIVADO! VAI CUSPIR O XML NA TELA DO GOOGLE SHEETS!
-            return {"sucesso": False, "erro": f"XML DA PREFEITURA SUCESSO: {xml_retorno_str[0][:800]}"}
-
-        elif consulta.portal == "NACIONAL":
-            return {"sucesso": False, "erro": "A rota do Portal Nacional ainda está em construção."}
-
-        return {"sucesso": True, "qtd": len(lista_de_notas), "notas": lista_de_notas}
+            # MODO ESPIÃO CONTINUA LIGADO: Para vermos se o 1102 foi vencido!
+            return {"sucesso": False, "erro": f"XML DA PREFEITURA: {xml_retorno_str[0][:800]}"}
 
     except Exception as e:
         return {"sucesso": False, "erro": f"Erro fatal no Extrator: {str(e)}"}
