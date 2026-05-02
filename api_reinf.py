@@ -3,6 +3,7 @@ import re
 import base64
 import hashlib
 import requests
+import zeep
 from datetime import datetime, timezone
 from lxml import etree
 from cryptography import x509
@@ -350,10 +351,14 @@ def buscar_notas(consulta: ConsultaNotas):
         
         lista_de_notas = list()
         
+        # ========================================================
+        # MOTOR 1: PREFEITURA DE SÃO PAULO (CAPITAL) VIA ZEEP SOAP
+        # ========================================================
         if consulta.portal == "SP_CAPITAL":
             if not consulta.ccm:
                 return {"sucesso": False, "erro": "CCM obrigatório para Prefeitura de SP."}
 
+            # 1. Salva as chaves para a conexão
             caminho_cert = f"/tmp/cert_busca_{consulta.cnpj_tomador}.pem"
             caminho_key = f"/tmp/key_busca_{consulta.cnpj_tomador}.pem"
             if os.name == 'nt':
@@ -362,76 +367,60 @@ def buscar_notas(consulta: ConsultaNotas):
             with open(caminho_cert, 'wb') as f: f.write(cert_pem)
             with open(caminho_key, 'wb') as f: f.write(chave_pem)
 
-            # ========================================================
-            # O PEDIDO CIRÚRGICO DA PREFEITURA DE SP (Manual v1)
-            # ========================================================
-            dt_ini = consulta.data_ini
-            dt_fim = consulta.data_fim
-
+            # 2. Monta e Assina o Pedido
             pedido_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <p1:PedidoConsultaNFeRecebidas xmlns:p1="http://www.prefeitura.sp.gov.br/nfe">
   <CPFCNPJ>
     <CNPJ>{consulta.cnpj_tomador.zfill(14)}</CNPJ>
   </CPFCNPJ>
   <Inscricao>{consulta.ccm.zfill(8)}</Inscricao>
-  <dtInicio>{dt_ini}</dtInicio>
-  <dtFim>{dt_fim}</dtFim>
+  <dtInicio>{consulta.data_ini}</dtInicio>
+  <dtFim>{consulta.data_fim}</dtFim>
 </p1:PedidoConsultaNFeRecebidas>'''
 
             pedido_assinado = assinar_xml_sp(pedido_xml, chave_privada, cert_der)
-            
-            # Limpa o XML assinado
             pedido_assinado_limpo = pedido_assinado.replace('\n', '').replace('\r', '')
-            import html
-            pedido_escapado = html.escape(pedido_assinado_limpo)
 
-            # O Envelope SOAP exigido pela Prefeitura de SP
-            soap_envelope = f'''<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-  <soap:Body>
-    <ConsultaNFeRecebidas xmlns="http://www.prefeitura.sp.gov.br/nfe">
-      <versaoSchema>1</versaoSchema>
-      <mensagemXML>{pedido_escapado}</mensagemXML>
-    </ConsultaNFeRecebidas>
-  </soap:Body>
-</soap:Envelope>'''
-
-            url_sp = "https://nfe.prefeitura.sp.gov.br/ws/lotenfe.asmx"
-            headers_sp = {
-                "Content-Type": "text/xml; charset=utf-8",
-                "SOAPAction": '"http://www.prefeitura.sp.gov.br/nfe/ws/consultaNFeRecebidas"'
-            }
-
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            
-            res = requests.post(url_sp, data=soap_envelope.encode('utf-8'), headers=headers_sp, cert=(caminho_cert, caminho_key), verify=False)
-
+            # 3. CONEXÃO SOAP PROFISSIONAL (ZEEP)
             try:
-                os.remove(caminho_cert)
-                os.remove(caminho_key)
-            except: pass
+                import urllib3
+                from zeep.transports import Transport
+                from requests import Session
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                
+                # Prepara o "carteiro" (Session) com o Certificado Digital A1
+                session = Session()
+                session.cert = (caminho_cert, caminho_key)
+                session.verify = False
+                transport = Transport(session=session)
+                
+                # Lê o Manual (WSDL) direto da Prefeitura
+                wsdl_url = "https://nfe.prefeitura.sp.gov.br/ws/lotenfe.asmx?wsdl"
+                cliente_soap = zeep.Client(wsdl=wsdl_url, transport=transport)
+                
+                # Dispara a função ConsultaNFeRecebidas do Governo
+                # Passando a "versaoSchema=1" e a "mensagemXML"
+                resposta_sp = cliente_soap.service.ConsultaNFeRecebidas(1, pedido_assinado_limpo)
+                
+            except Exception as ez:
+                return {"sucesso": False, "erro": f"Erro no Cliente SOAP: {str(ez)}"}
 
-            if res.status_code != 200:
-                erro_limpo = "Erro desconhecido HTTP " + str(res.status_code)
+            finally:
                 try:
-                    soap_erro = etree.fromstring(res.content)
-                    msg_soap = soap_erro.xpath('//*[local-name()="faultstring"]/text()')
-                    if msg_soap: erro_limpo = msg_soap[0]
-                except:
-                    erro_limpo = res.text[:200]
-                return {"sucesso": False, "erro": f"Recusado pela Prefeitura: {erro_limpo}"}
+                    os.remove(caminho_cert)
+                    os.remove(caminho_key)
+                except: pass
 
-            try:
-                soap_resp = etree.fromstring(res.content)
-            except:
-                return {"sucesso": False, "erro": "A prefeitura não retornou um XML válido."}
+            # 4. TRATA A RESPOSTA (O Zeep já devolve o XML limpo!)
+            if not resposta_sp:
+                return {"sucesso": False, "erro": "A prefeitura devolveu uma resposta nula."}
 
-            xml_retorno_str = soap_resp.xpath('//*[local-name()="RetornoXML"]/text()')
+            # Como o Zeep já extraiu o XML pra gente, a gente só precisa ler
+            xml_retorno = etree.fromstring(resposta_sp.encode('utf-8'))
             
-            # --- MODO DE INVESTIGAÇÃO LIGADO ---
-            # Vamos cuspir exatamente o que a prefeitura respondeu, sem filtro!
-            return {"sucesso": False, "erro": f"XML DA PREFEITURA: {xml_retorno_str[0]}"}
+            # --- MODO DE INVESTIGAÇÃO (DEBUG) ---
+            # Vamos cuspir o que o Zeep conseguiu ler da Prefeitura!
+            return {"sucesso": False, "erro": f"XML DA PREFEITURA VIA ZEEP: {resposta_sp[:800]}"}
             
             if not xml_retorno_str:
                 erros_api = soap_resp.xpath('//*[local-name()="Erro"]//*[local-name()="Descricao"]/text()')
