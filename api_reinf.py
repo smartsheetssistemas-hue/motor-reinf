@@ -23,35 +23,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# O pacote que o Google Sheets vai enviar para o e-CAC
+# O pacote que o Google Sheets vai enviar
 class LoteReinf(BaseModel):
     cnpj: str
     tipo_evento: str
     xml_bruto: str
-    cert_b64: str  
-    cert_senha: str 
+    cert_b64: str  # O arquivo .pfx transformado em texto
+    cert_senha: str # A senha do certificado
 
-# O pacote que o Google Sheets vai enviar para Consultar o e-CAC
-class ConsultaReinf(BaseModel):
-    cnpj: str
-    protocolo: str
-    cert_b64: str
-    cert_senha: str
-
-# O pacote que o Google Sheets vai enviar para Buscar Notas na Prefeitura
-class ConsultaNotas(BaseModel):
-    cnpj_tomador: str
-    ccm: str
-    data_ini: str
-    data_fim: str
-    portal: str
-    cert_b64: str
-    cert_senha: str
-
-
-# =========================================================
-# FUNÇÕES DE CERTIFICADO E ASSINATURA E-CAC
-# =========================================================
+# 1. FUNÇÃO: LER O CERTIFICADO DA MEMÓRIA RAM (Sem precisar de arquivo salvo)
 def preparar_credenciais_memoria(pfx_b64, senha):
     pfx_dados = base64.b64decode(pfx_b64)
     p12 = pkcs12.load_key_and_certificates(pfx_dados, senha.encode())
@@ -66,6 +46,7 @@ def preparar_credenciais_memoria(pfx_b64, senha):
     )
     return chave_privada, cert_der, cert_pem, chave_pem
 
+# 2. FUNÇÃO: ASSINATURA XADES ICP-BRASIL (O seu código genial!)
 def assinar_xades_icp_brasil(xml_str, chave_privada, cert_der):
     xml_str = re.sub(r'<ds:Signature.*?</ds:Signature>', '', xml_str, flags=re.DOTALL)
     xml_root_temp = etree.fromstring(xml_str.encode('utf-8'), etree.XMLParser(remove_blank_text=True))
@@ -177,61 +158,14 @@ def assinar_xades_icp_brasil(xml_str, chave_privada, cert_der):
 
     return xml_root
 
-# =========================================================
-# ASSINADOR ESPECÍFICO PARA A PREFEITURA DE SP
-# =========================================================
-def assinar_xml_sp(xml_str, chave_privada, cert_der):
-    xml_str = xml_str.replace('\n', '').replace('\r', '')
-    xml_root = etree.fromstring(xml_str.encode('utf-8'))
-    xml_c14n = etree.tostring(xml_root, method="c14n", exclusive=True, with_comments=False)
-    digest_xml = base64.b64encode(hashlib.sha1(xml_c14n).digest()).decode('utf-8')
-
-    cert_b64 = base64.b64encode(cert_der).decode('utf-8')
-
-    signature_xml = f'''<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
-  <SignedInfo>
-    <CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
-    <SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#rsa-sha1" />
-    <Reference URI="">
-      <Transforms>
-        <Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature" />
-        <Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
-      </Transforms>
-      <DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1" />
-      <DigestValue>{digest_xml}</DigestValue>
-    </Reference>
-  </SignedInfo>
-  <SignatureValue>DUMMY_SIGNATURE_VALUE</SignatureValue>
-  <KeyInfo>
-    <X509Data>
-      <X509Certificate>{cert_b64}</X509Certificate>
-    </X509Data>
-  </KeyInfo>
-</Signature>'''
-
-    # AQUI ESTÁ A CORREÇÃO DE TAG DO MANUAL QUE APLICAMOS AGORA!
-    xml_str_com_sig = xml_str.replace('</p1:PedidoConsultaNFePeriodo>', f'{signature_xml}</p1:PedidoConsultaNFePeriodo>')
-    xml_root_sig = etree.fromstring(xml_str_com_sig.encode('utf-8'))
-
-    signed_info_node = xml_root_sig.xpath('.//*[local-name()="SignedInfo"]')[0]
-    signed_info_c14n = etree.tostring(signed_info_node, method="c14n", exclusive=True, with_comments=False)
-    
-    signature_bytes = chave_privada.sign(signed_info_c14n, padding.PKCS1v15(), hashes.SHA1())
-    signature_b64 = base64.b64encode(signature_bytes).decode('utf-8')
-
-    sig_value_node = xml_root_sig.xpath('.//*[local-name()="SignatureValue"]')[0]
-    sig_value_node.text = signature_b64
-
-    return etree.tostring(xml_root_sig, encoding='utf-8').decode('utf-8')
-
-# =========================================================
-# ROTAS DO E-CAC (Transmissão e Consulta)
-# =========================================================
+# 3. A ROTA DE TRANSMISSÃO
 @app.post("/transmitir")
 def transmitir_xml(lote: LoteReinf):
     try:
+        # 1. Tira o certificado do texto Base64
         chave_privada, cert_der, cert_pem, chave_pem = preparar_credenciais_memoria(lote.cert_b64, lote.cert_senha)
         
+        # 2. Ajusta as TAGS de Identificação do Governo (seu código)
         xml_str = lote.xml_bruto
         nr_insc_match = re.search(r'<nrInsc>(\d+)</nrInsc>', xml_str)
         nr_insc = nr_insc_match.group(1) if nr_insc_match else lote.cnpj[:8]
@@ -250,10 +184,12 @@ def transmitir_xml(lote: LoteReinf):
         tp_insc = tp_insc_match.group(1) if tp_insc_match else "1"
         if tp_insc == '1' and len(nr_insc) > 8: nr_insc = nr_insc[:8]
 
+        # 3. Assina Criptograficamente o XML
         evento_assinado = assinar_xades_icp_brasil(xml_str, chave_privada, cert_der)
         evento_assinado_bytes = etree.tostring(evento_assinado, encoding='utf-8', xml_declaration=False)
         evento_assinado_str = evento_assinado_bytes.decode('utf-8')
 
+        # 4. Envelopa para o Lote Assíncrono do e-CAC
         lote_xml_str = f"""<?xml version="1.0" encoding="utf-8"?>
 <Reinf xmlns="http://www.reinf.esocial.gov.br/schemas/envioLoteEventosAssincrono/v1_00_00">
   <envioLoteEventos>
@@ -270,39 +206,61 @@ def transmitir_xml(lote: LoteReinf):
 </Reinf>"""
         lote_xml_bytes = lote_xml_str.encode('utf-8')
 
+        # 5. Salva chaves rapidamente só para criar a conexão HTTPS segura
         caminho_cert = f"/tmp/cert_{lote.cnpj}.pem"
         caminho_key = f"/tmp/key_{lote.cnpj}.pem"
+        # Se for no windows (para teste local), salva na mesma pasta
         if os.name == 'nt':
             caminho_cert, caminho_key = f"cert_{lote.cnpj}.pem", f"key_{lote.cnpj}.pem"
 
         with open(caminho_cert, 'wb') as f: f.write(cert_pem)
         with open(caminho_key, 'wb') as f: f.write(chave_pem)
 
+        # 6. ENVIA PARA A RECEITA FEDERAL
         url_reinf = "https://reinf.receita.economia.gov.br/recepcao/lotes"
-        res = requests.post(url_reinf, data=lote_xml_bytes, headers={'Content-Type': 'application/xml;charset=utf-8'}, cert=(caminho_cert, caminho_key))
+        res = requests.post(
+            url_reinf, 
+            data=lote_xml_bytes, 
+            headers={'Content-Type': 'application/xml;charset=utf-8'}, 
+            cert=(caminho_cert, caminho_key)
+        )
 
+        # 7. Apaga as chaves por segurança
         try:
             os.remove(caminho_cert)
             os.remove(caminho_key)
-        except: pass
+        except:
+            pass
 
+        # 8. Devolve a resposta pro Google Sheets
         if res.status_code == 201:
             prot_match = re.search(r'<protocoloEnvio>(.*?)</protocoloEnvio>', res.text)
             protocolo = prot_match.group(1) if prot_match else "Oculto"
-            return {"sucesso": True, "protocolo": protocolo, "msg": f"O e-CAC recebeu e gerou o Protocolo: {protocolo}"}
+            return {"sucesso": True, "protocolo": protocolo, "msg": f"O e-CAC recebeu o {lote.tipo_evento} e gerou o Protocolo: {protocolo}"}
         else:
             return {"sucesso": False, "erro": f"Rejeição do e-CAC:\n{res.text}"}
 
     except Exception as e:
         return {"sucesso": False, "erro": f"Erro Interno da API: {str(e)}"}
+# ---------------------------------------------------------
+# NOVA ROTA: CONSULTAR PROTOCOLO NO E-CAC
+# ---------------------------------------------------------
+class ConsultaReinf(BaseModel):
+    cnpj: str
+    protocolo: str
+    cert_b64: str
+    cert_senha: str
 
 @app.post("/consultar")
 def consultar_xml(consulta: ConsultaReinf):
     try:
+        # 1. Pega o certificado da memória
         chave_privada, cert_der, cert_pem, chave_pem = preparar_credenciais_memoria(consulta.cert_b64, consulta.cert_senha)
         
+        # 2. Rota oficial de Consulta do Governo
         url_consulta = f"https://reinf.receita.economia.gov.br/consulta/lotes/{consulta.protocolo}"
         
+        # 3. Salva chaves temporárias para a conexão HTTPS
         caminho_cert = f"/tmp/cert_cons_{consulta.cnpj}.pem"
         caminho_key = f"/tmp/key_cons_{consulta.cnpj}.pem"
         if os.name == 'nt':
@@ -311,139 +269,85 @@ def consultar_xml(consulta: ConsultaReinf):
         with open(caminho_cert, 'wb') as f: f.write(cert_pem)
         with open(caminho_key, 'wb') as f: f.write(chave_pem)
         
+        # 4. Faz a requisição de GET (Consulta)
         res = requests.get(url_consulta, cert=(caminho_cert, caminho_key))
         
+        # Apaga os arquivos do certificado
         try:
             os.remove(caminho_cert)
             os.remove(caminho_key)
-        except: pass
+        except:
+            pass
             
         xml_retorno = res.text
         
+        # 5. Analisa a Resposta do Governo
         if "<cdResposta>2</cdResposta>" in xml_retorno or "<cdRetorno>0</cdRetorno>" in xml_retorno:
             recibo_match = re.search(r'<nrRecibo>(.*?)</nrRecibo>', xml_retorno)
-            if not recibo_match: recibo_match = re.search(r'<nrRecArqBase>(.*?)</nrRecArqBase>', xml_retorno)
+            if not recibo_match: 
+                recibo_match = re.search(r'<nrRecArqBase>(.*?)</nrRecArqBase>', xml_retorno)
             recibo = recibo_match.group(1) if recibo_match else "Recibo Oculto"
+            
             return {"sucesso": True, "recibo": recibo, "xml_retorno": xml_retorno}
             
         elif "cdResposta>1<" in xml_retorno:
             return {"sucesso": False, "erro": "Lote ainda em processamento na fila da Receita. Tente novamente em alguns minutos."}
+            
         else:
             return {"sucesso": False, "erro": f"Lote Rejeitado pelo e-CAC:\n{xml_retorno}"}
             
     except Exception as e:
         return {"sucesso": False, "erro": f"Erro Interno da API: {str(e)}"}
+# ---------------------------------------------------------
+# NOVA ROTA: EXTRATOR UNIVERSAL DE NOTAS FISCAIS
+# ---------------------------------------------------------
+class ConsultaNotas(BaseModel):
+    cnpj_tomador: str
+    data_ini: str
+    data_fim: str
+    portal: str # "SP_CAPITAL", "NACIONAL", "GINFES"
+    cert_b64: str
+    cert_senha: str
 
-# =========================================================
-# ROTA: EXTRATOR UNIVERSAL DE NOTAS FISCAIS
-# =========================================================
 @app.post("/buscar_notas")
 def buscar_notas(consulta: ConsultaNotas):
     try:
-        if not consulta.cert_senha: return {"sucesso": False, "erro": "A senha do certificado está vazia na planilha."}
-        if not consulta.cert_b64 or len(consulta.cert_b64) < 100: return {"sucesso": False, "erro": "O arquivo .pfx não foi lido corretamente."}
+        chave_privada, cert_der, cert_pem, chave_pem = preparar_credenciais_memoria(consulta.cert_b64, consulta.cert_senha)
+        notas_encontradas =[]
 
-        try:
-            chave_privada, cert_der, cert_pem, chave_pem = preparar_credenciais_memoria(consulta.cert_b64, consulta.cert_senha)
-        except Exception as err_cert:
-            return {"sucesso": False, "erro": f"Certificado ou senha incorretos: {str(err_cert)}"}
-        
-        lista_de_notas = list()
-        
         # ========================================================
-        # MOTOR 1: PREFEITURA DE SÃO PAULO (CAPITAL) - FORÇA BRUTA CDATA
+        # MOTOR 1: PREFEITURA DE SÃO PAULO (CAPITAL)
         # ========================================================
         if consulta.portal == "SP_CAPITAL":
-            if not consulta.ccm:
-                return {"sucesso": False, "erro": "CCM obrigatório para Prefeitura de SP."}
-
-            caminho_cert = f"/tmp/cert_busca_{consulta.cnpj_tomador}.pem"
-            caminho_key = f"/tmp/key_busca_{consulta.cnpj_tomador}.pem"
-            if os.name == 'nt':
-                caminho_cert, caminho_key = f"cert_busca_{consulta.cnpj_tomador}.pem", f"key_busca_{consulta.cnpj_tomador}.pem"
-
-            with open(caminho_cert, 'wb') as f: f.write(cert_pem)
-            with open(caminho_key, 'wb') as f: f.write(chave_pem)
-
-            dt_ini = consulta.data_ini
-            dt_fim = consulta.data_fim
-
-            # O SEGREDO 1: SEM a tag <?xml version="1.0"?> no pedido interno
-            # O SEGREDO 2: Namespace p1 em todas as tags obrigatórias
-            pedido_xml = f'''<p1:PedidoConsultaNFePeriodo xmlns:p1="http://www.prefeitura.sp.gov.br/nfe">
-  <p1:Cabecalho Versao="1">
-    <p1:CPFCNPJRemetente>
-      <p1:CNPJ>{consulta.cnpj_tomador.zfill(14)}</p1:CNPJ>
-    </p1:CPFCNPJRemetente>
-  </p1:Cabecalho>
-  <p1:CPFCNPJ>
-    <p1:CNPJ>{consulta.cnpj_tomador.zfill(14)}</p1:CNPJ>
-  </p1:CPFCNPJ>
-  <p1:Inscricao>{consulta.ccm.zfill(8)}</p1:Inscricao>
-  <p1:dtInicio>{dt_ini}</p1:dtInicio>
-  <p1:dtFim>{dt_fim}</p1:dtFim>
-  <p1:NumeroPagina>1</p1:NumeroPagina>
-</p1:PedidoConsultaNFePeriodo>'''
-
-            # Assina a requisição
-            pedido_assinado = assinar_xml_sp(pedido_xml, chave_privada, cert_der)
+            # Aqui entrará a requisição SOAP oficial da Nota Paulistana
+            # Que usa o certificado A1 para baixar os XMLs
             
-            # Limpeza extrema: tira quebras de linha para o CDATA engolir fácil
-            pedido_assinado_limpo = pedido_assinado.replace('\n', '').replace('\r', '')
+            # (Simulação do formato padronizado que o Python vai devolver)
+            notas_encontradas.append({
+                "nf": "555",
+                "serie": "SN",
+                "cnpj_prestador": "10611620000110",
+                "nome_prestador": "ASTERSEG ELETRONICA LTDA",
+                "emissao": "2026-05-10",
+                "vencimento": "",
+                "pagamento": "2026-05-10",
+                "bruto": 1500.00,
+                "base": 1500.00,
+                "inss": 165.00,
+                "ir": 0.0,
+                "pcc": 69.75,
+                "natureza": "15044",
+                "cod_servico": "100000020"
+            })
 
-            # O SEGREDO 3: Envelope com CDATA exato, sem escape HTML
-            soap_envelope = f'''<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-  <soap:Body>
-    <ConsultaNFeRecebidas xmlns="http://www.prefeitura.sp.gov.br/nfe">
-      <versaoSchema>1</versaoSchema>
-      <mensagemXML><![CDATA[{pedido_assinado_limpo}]]></mensagemXML>
-    </ConsultaNFeRecebidas>
-  </soap:Body>
-</soap:Envelope>'''
+        # ========================================================
+        # MOTOR 2: PORTAL NACIONAL DA NFS-E (MEIs)
+        # ========================================================
+        elif consulta.portal == "NACIONAL":
+            # Aqui entrará a requisição para a API do Serpro/Portal Nacional
+            pass
 
-            url_sp = "https://nfe.prefeitura.sp.gov.br/ws/lotenfe.asmx"
-            headers_sp = {
-                "Content-Type": "text/xml; charset=utf-8",
-                "SOAPAction": '"http://www.prefeitura.sp.gov.br/nfe/ws/consultaNFeRecebidas"'
-            }
-
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            
-            # Envia a requisição forçando desativação de validação
-            res = requests.post(url_sp, data=soap_envelope.encode('utf-8'), headers=headers_sp, cert=(caminho_cert, caminho_key), verify=False)
-
-            try:
-                os.remove(caminho_cert)
-                os.remove(caminho_key)
-            except: pass
-
-            if res.status_code != 200:
-                erro_limpo = "Erro desconhecido HTTP " + str(res.status_code)
-                try:
-                    soap_erro = etree.fromstring(res.content)
-                    msg_soap = soap_erro.xpath('//*[local-name()="faultstring"]/text()')
-                    if msg_soap: erro_limpo = msg_soap[0]
-                except:
-                    erro_limpo = res.text[:200]
-                return {"sucesso": False, "erro": f"Recusado pela Prefeitura: {erro_limpo}"}
-
-            try:
-                soap_resp = etree.fromstring(res.content)
-            except:
-                return {"sucesso": False, "erro": "A prefeitura não retornou um XML válido. Retorno: " + res.text[:100]}
-
-            xml_retorno_str = soap_resp.xpath('//*[local-name()="RetornoXML"]/text()')
-            
-            if not xml_retorno_str:
-                erros_api = soap_resp.xpath('//*[local-name()="Erro"]//*[local-name()="Descricao"]/text()')
-                if erros_api:
-                    return {"sucesso": False, "erro": f"Erro API SP: {erros_api[0]}"}
-                return {"sucesso": True, "qtd": 0, "notas": []} 
-
-            # MODO ESPIÃO CONTINUA LIGADO: Para vermos se o 1102 foi vencido!
-            return {"sucesso": False, "erro": f"XML DA PREFEITURA: {xml_retorno_str[0][:800]}"}
+        return {"sucesso": True, "qtd": len(notas_encontradas), "notas": notas_encontradas}
 
     except Exception as e:
-        return {"sucesso": False, "erro": f"Erro fatal no Extrator: {str(e)}"}
+        return {"sucesso": False, "erro": str(e)}
