@@ -377,13 +377,17 @@ def buscar_notas(consulta: ConsultaNotas):
 
             pedido_assinado = assinar_xml_sp(pedido_xml, chave_privada, cert_der)
             pedido_assinado_limpo = pedido_assinado.replace('\n', '').replace('\r', '')
+            
+            # O SEGREDO DE OURO: Transformar as tags do XML interno em formato HTML entity (Exigência de SP)
+            import html
+            pedido_escapado = html.escape(pedido_assinado_limpo)
 
             soap_envelope = f'''<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
   <soap:Body>
     <ConsultaNFeRecebidas xmlns="http://www.prefeitura.sp.gov.br/nfe">
       <versaoSchema>1</versaoSchema>
-      <mensagemXML><![CDATA[{pedido_assinado_limpo}]]></mensagemXML>
+      <mensagemXML>{pedido_escapado}</mensagemXML>
     </ConsultaNFeRecebidas>
   </soap:Body>
 </soap:Envelope>'''
@@ -426,8 +430,68 @@ def buscar_notas(consulta: ConsultaNotas):
                 if erros_api: return {"sucesso": False, "erro": f"Erro API SP: {erros_api[0]}"}
                 return {"sucesso": True, "qtd": 0, "notas": []} 
 
-            # O MODO DEBUG: Retorna o XML bruto da Prefeitura de SP para lermos no Google Sheets!
-            return {"sucesso": False, "erro": f"XML DA PREFEITURA: {xml_retorno_str[0]}"}
+            # Descompacta o retorno
+            xml_retorno = etree.fromstring(xml_retorno_str[0].encode('utf-8'))
+            
+            # Checa os Alertas da Prefeitura
+            erros_sp = xml_retorno.xpath('//*[local-name()="Alerta"]')
+            if erros_sp:
+                msg_alerta = erros_sp[0].xpath('.//*[local-name()="Descricao"]/text()')[0]
+                if "Nenhuma NFe" in msg_alerta or "Nenhum" in msg_alerta:
+                    return {"sucesso": True, "qtd": 0, "notas": []}
+                else:
+                    return {"sucesso": False, "erro": f"Prefeitura recusou: {msg_alerta}"}
+
+            # Varre as notas recebidas
+            nfs = xml_retorno.xpath('//*[local-name()="NFe"]')
+            
+            for nf in nfs:
+                num_nf = nf.xpath('.//*[local-name()="NumeroNFe"]/text()')[0]
+                emissao_full = nf.xpath('.//*[local-name()="DataEmissaoNFe"]/text()')[0]
+                emissao_dia = emissao_full[:10]
+                
+                cnpj_p = nf.xpath('.//*[local-name()="InscricaoPrestador"]/text()')
+                cnpj_prestador = cnpj_p[0] if cnpj_p else "00000000000000"
+                
+                nome_p = nf.xpath('.//*[local-name()="RazaoSocialPrestador"]/text()')
+                nome_prestador = nome_p[0] if nome_p else "PRESTADOR DESCONHECIDO"
+                
+                v_bruto = float(nf.xpath('.//*[local-name()="ValorServicos"]/text()')[0])
+                
+                v_inss = nf.xpath('.//*[local-name()="ValorINSS"]/text()')
+                v_inss = float(v_inss[0]) if v_inss else 0.0
+                
+                v_ir = nf.xpath('.//*[local-name()="ValorIR"]/text()')
+                v_ir = float(v_ir[0]) if v_ir else 0.0
+                
+                v_pis = nf.xpath('.//*[local-name()="ValorPIS"]/text()')
+                v_pis = float(v_pis[0]) if v_pis else 0.0
+                
+                v_cof = nf.xpath('.//*[local-name()="ValorCOFINS"]/text()')
+                v_cof = float(v_cof[0]) if v_cof else 0.0
+                
+                v_csll = nf.xpath('.//*[local-name()="ValorCSLL"]/text()')
+                v_csll = float(v_csll[0]) if v_csll else 0.0
+
+                cod = nf.xpath('.//*[local-name()="CodigoServico"]/text()')
+                cod_servico = cod[0] if cod else ""
+
+                lista_de_notas.append({
+                    "nf": num_nf,
+                    "serie": "SN",
+                    "cnpj_prestador": cnpj_prestador,
+                    "nome_prestador": nome_prestador,
+                    "emissao": emissao_dia,
+                    "vencimento": emissao_dia, 
+                    "pagamento": emissao_dia,
+                    "bruto": v_bruto,
+                    "base": v_bruto,
+                    "inss": v_inss,
+                    "ir": v_ir,
+                    "pcc": round(v_pis + v_cof + v_csll, 2),
+                    "natureza": "15044", 
+                    "cod_servico": cod_servico
+                })
 
         elif consulta.portal == "NACIONAL":
             return {"sucesso": False, "erro": "A rota do Portal Nacional ainda está em construção."}
