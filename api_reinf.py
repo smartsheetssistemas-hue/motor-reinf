@@ -298,3 +298,56 @@ def consultar_xml(consulta: ConsultaReinf):
             
     except Exception as e:
         return {"sucesso": False, "erro": f"Erro Interno da API: {str(e)}"}
+# ---------------------------------------------------------
+# NOVA ROTA: EXTRATOR UNIVERSAL DE NOTAS FISCAIS
+# ---------------------------------------------------------
+class ConsultaNotas(BaseModel):
+    cnpj_tomador: str
+    data_ini: str
+    data_fim: str
+    portal: str # "SP_CAPITAL", "NACIONAL", "GINFES"
+    cert_b64: str
+    cert_senha: str
+
+@app.post("/buscar_notas")
+def buscar_notas(consulta: ConsultaNotas):
+    try:
+        chave_privada, cert_der, cert_pem, chave_pem = preparar_credenciais_memoria(consulta.cert_b64, consulta.cert_senha)
+        notas_encontradas =[]
+
+        # ========================================================
+        # MOTOR 1: PREFEITURA DE SÃO PAULO (CAPITAL)
+        # ========================================================
+        if consulta.portal == "SP_CAPITAL":
+            # Aqui entrará a requisição SOAP oficial da Nota Paulistana
+            # Que usa o certificado A1 para baixar os XMLs
+            
+            # (Simulação do formato padronizado que o Python vai devolver)
+            notas_encontradas.append({
+                "nf": "555",
+                "serie": "SN",
+                "cnpj_prestador": "10611620000110",
+                "nome_prestador": "ASTERSEG ELETRONICA LTDA",
+                "emissao": "2026-05-10",
+                "vencimento": "",
+                "pagamento": "2026-05-10",
+                "bruto": 1500.00,
+                "base": 1500.00,
+                "inss": 165.00,
+                "ir": 0.0,
+                "pcc": 69.75,
+                "natureza": "15044",
+                "cod_servico": "100000020"
+            })
+
+        # ========================================================
+        # MOTOR 2: PORTAL NACIONAL DA NFS-E (MEIs)
+        # ========================================================
+        elif consulta.portal == "NACIONAL":
+            # Aqui entrará a requisição para a API do Serpro/Portal Nacional
+            pass
+
+        return {"sucesso": True, "qtd": len(notas_encontradas), "notas": notas_encontradas}
+
+    except Exception as e:
+        return {"sucesso": False, "erro": str(e)}
