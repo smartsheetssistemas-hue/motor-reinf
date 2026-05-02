@@ -380,74 +380,100 @@ def buscar_notas(consulta: ConsultaNotas):
         # ========================================================
         # MOTOR 1: PREFEITURA DE SÃO PAULO (CAPITAL)
         # ========================================================
+        # ========================================================
+        # MOTOR 1: PREFEITURA DE SÃO PAULO (CAPITAL)
+        # ========================================================
         if consulta.portal == "SP_CAPITAL":
             if not consulta.ccm:
                 return {"sucesso": False, "erro": "CCM obrigatório para Prefeitura de SP."}
 
-            # A Prefeitura de SP não busca por "data de emissão", e sim por "Data do Fato".
-            # Garante formato YYYY-MM-DD
             dt_ini = consulta.data_ini
             dt_fim = consulta.data_fim
 
-            # Monta o Pedido
+            # O Envelope do Pedido Exato que SP espera
             pedido_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <p1:PedidoConsultaNFeRecebidas xmlns:p1="http://www.prefeitura.sp.gov.br/nfe">
-  <CPFCNPJ><CNPJ>{consulta.cnpj_tomador.zfill(14)}</CNPJ></CPFCNPJ>
+  <CPFCNPJ>
+    <CNPJ>{consulta.cnpj_tomador.zfill(14)}</CNPJ>
+  </CPFCNPJ>
   <Inscricao>{consulta.ccm.zfill(8)}</Inscricao>
   <dtInicio>{dt_ini}</dtInicio>
   <dtFim>{dt_fim}</dtFim>
 </p1:PedidoConsultaNFeRecebidas>'''
 
+            # Assina a requisição
             pedido_assinado = assinar_xml_sp(pedido_xml, chave_privada, cert_der)
             pedido_assinado_limpo = pedido_assinado.replace('\n', '').replace('\r', '')
 
-            # Envelope SOAP exigido pela Prefeitura de SP
+            # Envelope SOAP (VersaoSchema 1 é o exigido na documentação atual)
             soap_envelope = f'''<?xml version="1.0" encoding="utf-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:nfe="http://www.prefeitura.sp.gov.br/nfe">
-   <soapenv:Header/>
-   <soapenv:Body>
-      <nfe:ConsultaNFeRecebidas>
-         <versaoSchema>1</versaoSchema>
-         <mensagemXML><![CDATA[{pedido_assinado_limpo}]]></mensagemXML>
-      </nfe:ConsultaNFeRecebidas>
-   </soapenv:Body>
-</soapenv:Envelope>'''
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <ConsultaNFeRecebidas xmlns="http://www.prefeitura.sp.gov.br/nfe">
+      <versaoSchema>1</versaoSchema>
+      <mensagemXML><![CDATA[{pedido_assinado_limpo}]]></mensagemXML>
+    </ConsultaNFeRecebidas>
+  </soap:Body>
+</soap:Envelope>'''
 
             url_sp = "https://nfe.prefeitura.sp.gov.br/ws/lotenfe.asmx"
             headers_sp = {
                 "Content-Type": "text/xml; charset=utf-8",
-                "SOAPAction": "http://www.prefeitura.sp.gov.br/nfe/ws/consultaNFeRecebidas"
+                "SOAPAction": '"http://www.prefeitura.sp.gov.br/nfe/ws/consultaNFeRecebidas"'
             }
 
-            # Dispara
-            res = requests.post(url_sp, data=soap_envelope.encode('utf-8'), headers=headers_sp, cert=(caminho_cert, caminho_key))
+            # Envia a requisição forçando desativação de validação (a prefeitura SP às vezes rejeita TLS modernos)
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             
-            if res.status_code != 200:
-                return {"sucesso": False, "erro": f"Erro de comunicação com a Prefeitura: {res.status_code}\n{res.text}"}
+            res = requests.post(url_sp, data=soap_envelope.encode('utf-8'), headers=headers_sp, cert=(caminho_cert, caminho_key), verify=False)
 
-            # Extração Cautelosa do Retorno SOAP
-            soap_resp = etree.fromstring(res.content)
+            # ========================================================
+            # NOVA BLINDAGEM DE ERRO (DESTRÓI O NONETYPE)
+            # ========================================================
+            # Se a prefeitura mandar erro HTTP (Ex: 500 Internal Error)
+            if res.status_code != 200:
+                # Tenta achar a palavra de erro dentro da "sujeira" que a prefeitura mandou
+                erro_limpo = "Erro desconhecido HTTP " + str(res.status_code)
+                try:
+                    soap_erro = etree.fromstring(res.content)
+                    msg_soap = soap_erro.xpath('//*[local-name()="faultstring"]/text()')
+                    if msg_soap: erro_limpo = msg_soap[0]
+                except:
+                    erro_limpo = res.text[:200] # Se não for XML, pega o texto puro
+                
+                return {"sucesso": False, "erro": f"Recusado pela Prefeitura: {erro_limpo}"}
+
+            # Lê o que veio
+            try:
+                soap_resp = etree.fromstring(res.content)
+            except:
+                return {"sucesso": False, "erro": "A prefeitura não retornou um XML válido. Retorno: " + res.text[:100]}
+
             xml_retorno_str = soap_resp.xpath('//*[local-name()="RetornoXML"]/text()')
             
             if not xml_retorno_str:
-                return {"sucesso": True, "qtd": 0, "notas": []} # Não deu erro, mas não veio XML
+                # Procura erros específicos de sistema dentro da tag <Erro> se não vier XML de Retorno
+                erros_api = soap_resp.xpath('//*[local-name()="Erro"]//*[local-name()="Descricao"]/text()')
+                if erros_api:
+                    return {"sucesso": False, "erro": f"Erro API SP: {erros_api[0]}"}
+                
+                return {"sucesso": True, "qtd": 0, "notas": []} 
 
+            # Transforma o texto do CDATA em XML novamente
             xml_retorno = etree.fromstring(xml_retorno_str[0].encode('utf-8'))
             
-            # Checa os Alertas da Prefeitura (como: Sem notas no período)
             erros_sp = xml_retorno.xpath('//*[local-name()="Alerta"]')
             if erros_sp:
                 msg_alerta = erros_sp[0].xpath('.//*[local-name()="Descricao"]/text()')[0]
                 if "Nenhuma NFe" in msg_alerta or "Nenhum" in msg_alerta:
                     return {"sucesso": True, "qtd": 0, "notas": []}
                 else:
-                    return {"sucesso": False, "erro": f"Prefeitura recusou a busca: {msg_alerta}"}
+                    return {"sucesso": False, "erro": f"Prefeitura recusou: {msg_alerta}"}
 
-            # Lê e decodifica cada Nota
             nfs = xml_retorno.xpath('//*[local-name()="NFe"]')
             
             for nf in nfs:
-                # O XPATH usa local-name() para burlar o namespace infernal que a prefeitura manda
                 num_nf = nf.xpath('.//*[local-name()="NumeroNFe"]/text()')[0]
                 emissao_full = nf.xpath('.//*[local-name()="DataEmissaoNFe"]/text()')[0]
                 emissao_dia = emissao_full[:10]
@@ -460,7 +486,7 @@ def buscar_notas(consulta: ConsultaNotas):
                 
                 v_bruto = float(nf.xpath('.//*[local-name()="ValorServicos"]/text()')[0])
                 
-                # Valores Implicitos (Se a tag não existir, o imposto é Zero)
+                # Campos de imposto (só traz se o prestador destacou)
                 v_inss = nf.xpath('.//*[local-name()="ValorINSS"]/text()')
                 v_inss = float(v_inss[0]) if v_inss else 0.0
                 
@@ -469,10 +495,8 @@ def buscar_notas(consulta: ConsultaNotas):
                 
                 v_pis = nf.xpath('.//*[local-name()="ValorPIS"]/text()')
                 v_pis = float(v_pis[0]) if v_pis else 0.0
-                
                 v_cof = nf.xpath('.//*[local-name()="ValorCOFINS"]/text()')
                 v_cof = float(v_cof[0]) if v_cof else 0.0
-                
                 v_csll = nf.xpath('.//*[local-name()="ValorCSLL"]/text()')
                 v_csll = float(v_csll[0]) if v_csll else 0.0
 
