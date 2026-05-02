@@ -362,6 +362,9 @@ def buscar_notas(consulta: ConsultaNotas):
             with open(caminho_cert, 'wb') as f: f.write(cert_pem)
             with open(caminho_key, 'wb') as f: f.write(chave_pem)
 
+            # ========================================================
+            # O PEDIDO CIRÚRGICO DA PREFEITURA DE SP (Manual v1)
+            # ========================================================
             dt_ini = consulta.data_ini
             dt_fim = consulta.data_fim
 
@@ -376,12 +379,13 @@ def buscar_notas(consulta: ConsultaNotas):
 </p1:PedidoConsultaNFeRecebidas>'''
 
             pedido_assinado = assinar_xml_sp(pedido_xml, chave_privada, cert_der)
-            pedido_assinado_limpo = pedido_assinado.replace('\n', '').replace('\r', '')
             
-            # O SEGREDO DE OURO: Transformar as tags do XML interno em formato HTML entity (Exigência de SP)
+            # Limpa o XML assinado
+            pedido_assinado_limpo = pedido_assinado.replace('\n', '').replace('\r', '')
             import html
             pedido_escapado = html.escape(pedido_assinado_limpo)
 
+            # O Envelope SOAP exigido pela Prefeitura de SP
             soap_envelope = f'''<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
   <soap:Body>
@@ -421,9 +425,13 @@ def buscar_notas(consulta: ConsultaNotas):
             try:
                 soap_resp = etree.fromstring(res.content)
             except:
-                return {"sucesso": False, "erro": "A prefeitura não retornou um XML válido. Retorno: " + res.text[:100]}
+                return {"sucesso": False, "erro": "A prefeitura não retornou um XML válido."}
 
             xml_retorno_str = soap_resp.xpath('//*[local-name()="RetornoXML"]/text()')
+            
+            # --- MODO DE INVESTIGAÇÃO LIGADO ---
+            # Vamos cuspir exatamente o que a prefeitura respondeu, sem filtro!
+            return {"sucesso": False, "erro": f"XML DA PREFEITURA: {xml_retorno_str[0]}"}
             
             if not xml_retorno_str:
                 erros_api = soap_resp.xpath('//*[local-name()="Erro"]//*[local-name()="Descricao"]/text()')
