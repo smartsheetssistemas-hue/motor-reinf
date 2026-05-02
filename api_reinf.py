@@ -298,13 +298,13 @@ def consultar_xml(consulta: ConsultaReinf):
             
     except Exception as e:
         return {"sucesso": False, "erro": f"Erro Interno da API: {str(e)}"}
-# ---------------------------------------------------------
+# =========================================================
 # ROTA: EXTRATOR UNIVERSAL DE NOTAS FISCAIS
-# ---------------------------------------------------------
+# =========================================================
 class ConsultaNotas(BaseModel):
     cnpj_tomador: str
-    ccm: str         # <-- O Python agora espera receber isso!
-    data_ini: str    # <-- E as datas também!
+    ccm: str
+    data_ini: str
     data_fim: str
     portal: str
     cert_b64: str
@@ -313,27 +313,30 @@ class ConsultaNotas(BaseModel):
 @app.post("/buscar_notas")
 def buscar_notas(consulta: ConsultaNotas):
     try:
-        # Tenta carregar o certificado. Se der erro, ele captura e avisa o Sheets
-        try:
-            chave_privada, cert_der, cert_pem, chave_pem = preparar_credenciais_memoria(consulta.cert_b64, consulta.cert_senha)
-        except Exception as err_cert:
-            return {"sucesso": False, "erro": f"Certificado ou senha incorretos: {str(err_cert)}"}
+        # AQUI VAMOS FAZER UM TESTE DE "PING" SEGURO ANTES DE BATER NA RECEITA
+        # Se a senha for vazia, nós barramos na hora pra não dar Crash
+        if not consulta.cert_senha:
+            return {"sucesso": False, "erro": "A senha do certificado está vazia na planilha."}
         
-        # Inicia a lista de notas vazia
+        # Como o certificado só é necessário para o e-CAC de verdade (ou WebService), 
+        # e aqui estamos simulando, eu vou apenas validar se ele enviou o Base64.
+        if not consulta.cert_b64 or len(consulta.cert_b64) < 100:
+            return {"sucesso": False, "erro": "O arquivo .pfx não foi lido corretamente no Google Drive."}
+
+        # Inicializa a lista de notas vazia
         lista_de_notas = list()
         
         # Simulador: Se a busca for em SP, ele devolve uma nota de teste
         if consulta.portal == "SP_CAPITAL":
             
-            # --- FUTURO ESPAÇO PARA O CÓDIGO DA PREFEITURA ---
-            # Aqui entrará a conexão real, usando o consulta.ccm e consulta.data_ini
+            # (Futuramente aqui entrará a conexão SOAP da Prefeitura de SP)
             
             lista_de_notas.append({
                 "nf": "999",
                 "serie": "SN",
                 "cnpj_prestador": "10611620000110",
                 "nome_prestador": f"ASTERSEG (Nota Simulada - CCM: {consulta.ccm})",
-                "emissao": consulta.data_ini, # Usa a data que você mandou na tela!
+                "emissao": consulta.data_ini, 
                 "vencimento": consulta.data_fim,
                 "pagamento": consulta.data_fim,
                 "bruto": 1500.00,
@@ -345,7 +348,10 @@ def buscar_notas(consulta: ConsultaNotas):
                 "cod_servico": "100000020"
             })
             
+        elif consulta.portal == "NACIONAL":
+            return {"sucesso": False, "erro": "A rota do Portal Nacional ainda está em construção."}
+
         return {"sucesso": True, "qtd": len(lista_de_notas), "notas": lista_de_notas}
 
     except Exception as e:
-        return {"sucesso": False, "erro": str(e)}
+        return {"sucesso": False, "erro": f"Erro fatal no Python: {str(e)}"}
